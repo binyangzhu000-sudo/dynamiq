@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -149,7 +149,17 @@ class DecisionAggregation(str, Enum):
     COUNT = "count"
 
 
-class NamedField(BaseModel):
+class Authored(BaseModel):
+    """A model whose id the user wrote: a rule code, a row id, a field id.
+
+    Findings, matched rules and test coverage are keyed by that id, so a clone keeps it where a node or a
+    Choice option gets a new one.
+    """
+
+    keeps_id: ClassVar[bool] = True
+
+
+class NamedField(Authored):
     """A field the user defines by name. `type` uses the Input node vocabulary: string, int, float, bool, Any."""
 
     id: str = Field(default_factory=generate_uuid)
@@ -163,7 +173,7 @@ class SubWorkflowField(NamedField):
     required: bool = False
 
 
-class DecisionRule(BaseModel):
+class DecisionRule(Authored):
     """One row of a DecisionTable: a condition cell per input column and a value cell per output column."""
 
     id: str = Field(default_factory=generate_uuid)
@@ -173,7 +183,7 @@ class DecisionRule(BaseModel):
     enabled: bool = True
 
 
-class ExpressionItem(BaseModel):
+class ExpressionItem(Authored):
     """One output of an Expression node: the key it is returned under and the expression that computes it."""
 
     id: str = Field(default_factory=generate_uuid)
@@ -196,7 +206,7 @@ class RuleMissingPolicy(str, Enum):
     FAIL = "fail"
 
 
-class DerivedValue(BaseModel):
+class DerivedValue(Authored):
     """A value a Rules node computes once per record, before its rules run, and exposes to them by name."""
 
     id: str = Field(default_factory=generate_uuid)
@@ -204,7 +214,7 @@ class DerivedValue(BaseModel):
     expression: str
 
 
-class Rule(BaseModel):
+class Rule(Authored):
     """One check of a Rules node.
 
     `check` is an expression that must hold for the rule to pass; `applies_when` is an optional precondition,

@@ -2,8 +2,8 @@ from dynamiq.flows import Flow
 from dynamiq.nodes import InputTransformer
 from dynamiq.nodes.cloning import regenerate_node_ids
 from dynamiq.nodes.node import NodeDependency, NodeOutputReference
-from dynamiq.nodes.operators import Choice, ChoiceOption, DecisionTable, Pass, SubWorkflow
-from dynamiq.nodes.types import ChoiceCondition, ConditionOperator, DecisionRule, NamedField
+from dynamiq.nodes.operators import Choice, ChoiceOption, DecisionTable, Pass, Rules, SubWorkflow
+from dynamiq.nodes.types import ChoiceCondition, ConditionOperator, DecisionRule, DerivedValue, NamedField, Rule
 from dynamiq.nodes.utils import Input
 
 
@@ -136,8 +136,38 @@ def test_paths_naming_a_column_or_an_option_rather_than_a_node_are_left_alone():
 
     clone = regenerate_node_ids(node.clone(), {})
 
-    # The column and the option carry new ids, but `$.fico` and `$.query` name input keys, not nodes.
+    # The column keeps its id and the option carries a new one, but `$.fico` and `$.query` name input
+    # keys, not nodes.
     cloned_table, cloned_route = clone.flow.nodes
-    assert cloned_table.input_columns[0].id != "fico"
+    assert cloned_table.input_columns[0].id == "fico"
+    assert cloned_route.options[0].id != "query"
     assert cloned_table.input_transformer.selector == {"fico": "$.fico"}
     assert cloned_route.input_transformer.selector == {"q": "$.query"}
+
+
+def test_a_rule_a_row_and_a_field_keep_the_ids_the_user_wrote_where_the_node_gets_a_new_one():
+    table = DecisionTable(
+        id="pricing",
+        input_columns=[NamedField(id="col-1", name="tier")],
+        output_columns=[NamedField(id="col-2", name="rate")],
+        rules=[DecisionRule(id="r-1", when=["gold"], then=[0.1])],
+    )
+    checks = Rules(
+        id="review",
+        input_fields=[NamedField(id="f-1", name="claim")],
+        derived_values=[DerivedValue(id="d-1", name="total", expression="claim.amount")],
+        rules=[Rule(id="POL-01", check="claim.amount < 1000")],
+    )
+
+    id_map: dict[str, set[str]] = {}
+    table_copy = regenerate_node_ids(table.clone(), id_map)
+    checks_copy = regenerate_node_ids(checks.clone(), id_map)
+
+    assert table_copy.id != "pricing" and checks_copy.id != "review"
+    assert set(id_map) == {"pricing", "review"}
+    assert [rule.id for rule in table_copy.rules] == ["r-1"]
+    assert [column.id for column in table_copy.input_columns + table_copy.output_columns] == ["col-1", "col-2"]
+    assert [rule.id for rule in checks_copy.rules] == ["POL-01"]
+    assert [field.id for field in checks_copy.input_fields] == ["f-1"]
+    assert [value.id for value in checks_copy.derived_values] == ["d-1"]
+    assert table_copy.to_dict(for_tracing=True)["rules"][0]["id"] == "r-1"

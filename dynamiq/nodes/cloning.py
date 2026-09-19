@@ -27,6 +27,7 @@ def regenerate_node_ids(obj: Any, id_map: dict[str, set[str]] | None = None) -> 
     reading the outputs it read before; a dependency gated on a Choice option follows the option's
     new id the same way, so the gate keeps holding. Only node ids drive the path rewrite and only
     option ids the gates: a column or a rule may carry the same text as an input key without meaning it.
+    A rule, a row or a field keeps the id the user wrote, which findings and test coverage are keyed by.
 
     Args:
         obj: The object to walk.
@@ -61,6 +62,9 @@ def _regenerate_ids(
         if id(obj) in seen:
             return obj
         seen.add(id(obj))
+        # A rule, a row or a field keeps the id the user wrote, and holds nothing else to rename.
+        if getattr(obj, "keeps_id", False):
+            return obj
         if hasattr(obj, "id"):
             previous_id = getattr(obj, "id")
             new_id = str(uuid4())

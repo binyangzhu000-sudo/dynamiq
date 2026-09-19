@@ -655,7 +655,7 @@ def test_an_escape_through_a_filter_fails_the_run_instead_of_running():
     assert "unsafe" in str(result.error).lower()
 
 
-def test_five_hundred_rules_cost_milliseconds_per_record_and_a_batch_runs_per_record_under_a_map():
+def test_five_hundred_rules_cost_milliseconds_per_record_and_a_map_shares_the_compiled_rules(monkeypatch):
     rules = [
         Rule(
             id=f"CHK-{index:03d}",
@@ -681,15 +681,26 @@ def test_five_hundred_rules_cost_milliseconds_per_record_and_a_batch_runs_per_re
     # without tying the suite to the speed of the machine it runs on.
     assert per_record < 2, f"500 rules took {per_record:.3f}s for one record"
 
+    compile_rules = Rules._compile_rules
+    compiled_by = []
+
+    def counting(self):
+        compiled_by.append(self.id)
+        return compile_rules(self)
+
+    monkeypatch.setattr(Rules, "_compile_rules", counting)
     batch = Map(id="batch", name="batch", node=node, max_workers=8)
-    started = time.perf_counter()
     result = batch.run(input_data={"input": [record] * 16}, config=RunnableConfig(callbacks=[]))
-    elapsed = time.perf_counter() - started
 
     assert result.status == RunnableStatus.SUCCESS
     assert [item["summary"]["fail"] for item in result.output["output"]] == [500 * 9 // 20] * 16
-    # The batch is bounded by the serial cost measured on this machine, so it never depends on core count.
-    assert elapsed < max(5.0, per_record * 16 * 3), f"16 records took {elapsed:.1f}s, one took {per_record:.3f}s"
+    # Each item runs on a clone that shares the compiled rules and keeps their ids: compiling five hundred
+    # templates per item would cost far more than evaluating them, which the wall clock of a loaded CI
+    # runner cannot be trusted to show.
+    assert compiled_by == []
+    assert {finding["rule_id"] for item in result.output["output"] for finding in item["findings"]} == {
+        rule.id for rule in rules
+    }
 
 
 # --- Customs: a broker checks an import declaration before it is lodged ---------------------------
