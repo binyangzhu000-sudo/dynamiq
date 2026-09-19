@@ -460,26 +460,32 @@ def flow_ui_for(flow: dict, custom: dict | None = None) -> dict:
         custom_node_data[ui_id] = {**node, "id": ui_id, "name": slug}
         nested_custom_entries(node, custom_node_data)
 
+    by_slug = {node.get("id"): node for node in flow.get("nodes", [])}
     edges = []
     for node in flow.get("nodes", []):
         target = ui_ids.get(node.get("id"))
         for dep in node.get("depends", []) or []:
-            source = ui_ids.get(dep.get("node") if isinstance(dep, dict) else dep)
+            dep = {"node": dep} if isinstance(dep, str) else dep
+            source = ui_ids.get(dep.get("node"))
             if not source or not target:
                 continue
+            # A branch leaves a Choice through the option's own handle, and the editor labels it with
+            # the option's name; every other edge leaves through the node's single source handle.
+            option = choice_option(by_slug.get(dep.get("node")), dep.get("option"))
+            handle = option["id"] if option else "source"
             edges.append(
                 {
-                    "id": f"reactflow__edge-{source}source-{target}target",
+                    "id": f"reactflow__edge-{source}{handle}-{target}target",
                     "type": "smoothstep",
-                    "label": None,
+                    "label": option["name"] if option else None,
                     "style": {"stroke": "#96A1B8", "opacity": 1, "stroke_width": 2},
                     "source": source,
                     "target": target,
                     "animated": True,
                     "marker_end": {"type": "arrow", "color": "#96A1B8", "opacity": 1},
-                    "source_handle": "source",
+                    "source_handle": handle,
                     "target_handle": "target",
-                    "is_choice_option": False,
+                    "is_choice_option": option is not None,
                 }
             )
     # A top-level node is keyed by the canvas uuid minted above, and a caller cannot predict
@@ -490,6 +496,19 @@ def flow_ui_for(flow: dict, custom: dict | None = None) -> dict:
         custom_node_data[key] = {**custom_node_data.get(key, {}), **entry}
 
     return {"nodes": nodes, "edges": edges, "custom_node_data": custom_node_data}
+
+
+def choice_option(source: dict | None, option) -> dict | None:
+    """The option of a Choice node a dependency names, by id or by name; None when there is none."""
+    if option is None or not isinstance(source, dict) or source.get("type") != flowcheck.CHOICE_TYPE:
+        return None
+    for candidate in source.get("options") or []:
+        if isinstance(candidate, dict) and option in (candidate.get("id"), candidate.get("name")):
+            return {
+                "id": str(candidate.get("id") or candidate.get("name")),
+                "name": str(candidate.get("name") or candidate.get("id")),
+            }
+    return None
 
 
 @workflow.command("list")
