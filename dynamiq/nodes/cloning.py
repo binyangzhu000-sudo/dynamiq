@@ -24,10 +24,12 @@ def regenerate_node_ids(obj: Any, id_map: dict[str, set[str]] | None = None) -> 
 
     Transformer paths that address a node by id (``$.<id>.output``), such as the ones between the
     nodes of a flow a SubWorkflow holds, are rewritten to the new ids afterwards, so the clone keeps
-    reading the outputs it read before; a dependency gated on a Choice option follows the option's
-    new id the same way, so the gate keeps holding. Only node ids drive the path rewrite and only
-    option ids the gates: a column or a rule may carry the same text as an input key without meaning it.
-    A rule, a row or a field keeps the id the user wrote, which findings and test coverage are keyed by.
+    reading the outputs it read before; a Choice option's condition naming a node follows it too, and
+    a dependency gated on a Choice option follows the option's new id, so the gate keeps holding.
+    Only node ids drive the path rewrite and only option ids the gates: a column or a rule may carry
+    the same text as an input key without meaning it. An output transformer and a dependency's own
+    condition read a result rather than the flow, so they are left as written. A rule, a row or a
+    field keeps the id the user wrote, which findings and test coverage are keyed by.
 
     Args:
         obj: The object to walk.
@@ -112,27 +114,41 @@ def _path_renamer(renamed: dict[str, str]) -> Callable[[Any], Any]:
 
 def _remap_transformer_paths(obj: Any, renamed: dict[str, str]) -> None:
     # Imported here: the node module is the one that imports this package's operators.
-    from dynamiq.nodes.node import Transformer
+    from dynamiq.nodes.node import OutputTransformer, Transformer
 
     if not renamed:
         return
     rename = _path_renamer(renamed)
-    for transformer in (model for model in _models(obj) if isinstance(model, Transformer)):
+    # An output transformer selects from the node's own output, whose keys are not node ids, so a
+    # node named like one of them must not pull its paths along.
+    for transformer in (
+        model for model in _models(obj) if isinstance(model, Transformer) and not isinstance(model, OutputTransformer)
+    ):
         transformer.path = rename(transformer.path)
         if transformer.selector:
             transformer.selector = {key: rename(value) for key, value in transformer.selector.items()}
 
 
 def _remap_choice_conditions(obj: Any, renamed: dict[str, str]) -> None:
-    from dynamiq.nodes.types import ChoiceCondition
+    from dynamiq.nodes.operators.operators import ChoiceOption
 
     if not renamed:
         return
-    # A condition reads the same node-id-keyed input a transformer selector does, so a gate that names
-    # a node by id would otherwise resolve against an id no node in the copy carries.
+    # An option's condition reads the same node-id-keyed input a transformer selector does, so a gate
+    # that names a node by id would otherwise resolve against an id no node in the copy carries. A
+    # dependency's condition reads the dependency's result (status, input, output, error) instead, so
+    # a node named `output` or `status` must leave it alone.
     rename = _path_renamer(renamed)
-    for condition in (model for model in _models(obj) if isinstance(model, ChoiceCondition)):
-        condition.variable = rename(condition.variable)
+    for option in (model for model in _models(obj) if isinstance(model, ChoiceOption)):
+        _rename_condition(option.condition, rename)
+
+
+def _rename_condition(condition: Any, rename: Callable[[Any], Any]) -> None:
+    if condition is None:
+        return
+    condition.variable = rename(condition.variable)
+    for operand in condition.operands or []:
+        _rename_condition(operand, rename)
 
 
 def _remap_dependency_options(obj: Any, renamed: dict[str, str]) -> None:

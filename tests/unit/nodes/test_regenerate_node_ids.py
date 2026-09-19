@@ -1,5 +1,5 @@
 from dynamiq.flows import Flow
-from dynamiq.nodes import InputTransformer
+from dynamiq.nodes import InputTransformer, OutputTransformer
 from dynamiq.nodes.cloning import regenerate_node_ids
 from dynamiq.nodes.node import NodeDependency, NodeOutputReference
 from dynamiq.nodes.operators import Choice, ChoiceOption, DecisionTable, Pass, Rules, SubWorkflow
@@ -97,6 +97,61 @@ def test_a_choice_condition_naming_a_node_by_id_follows_the_new_id():
     assert cloned_start.id != "start"
     assert cloned_route.options[0].condition.operands[0].variable == f'$."{cloned_start.id}".output.score'
     assert route.options[0].condition.operands[0].variable == "$.start.output.score"
+
+
+def test_a_dependency_condition_and_an_output_transformer_read_results_not_nodes():
+    """A node named `output` or `content` must not pull along the paths that read a result's keys."""
+    start = Input(id="input", name="input")
+    content = Pass(id="content", name="content", depends=[NodeDependency(node=start)])
+    end = Pass(
+        id="output",
+        name="output",
+        depends=[
+            NodeDependency(
+                node=content,
+                condition=ChoiceCondition(
+                    operator=ConditionOperator.NUMERIC_GREATER_THAN, variable="$.output.score", value=5
+                ),
+            )
+        ],
+        input_transformer=InputTransformer(selector={"score": "$.content.output.score"}),
+        output_transformer=OutputTransformer(selector={"answer": "$.content"}),
+    )
+    node = SubWorkflow(id="sub", name="sub", flow=Flow(id="flow", nodes=[start, content, end]))
+
+    clone = regenerate_node_ids(node.clone(), {})
+
+    _, cloned_content, cloned_end = clone.flow.nodes
+    assert cloned_content.id != "content"
+    assert cloned_end.depends[0].condition.variable == "$.output.score"
+    assert cloned_end.output_transformer.selector == {"answer": "$.content"}
+    assert cloned_end.input_transformer.selector == {"score": f'$."{cloned_content.id}".output.score'}
+
+
+def test_a_flow_copy_gives_each_dependency_its_own_condition():
+    start = Pass(id="start", name="start")
+    end = Pass(
+        id="end",
+        name="end",
+        depends=[
+            NodeDependency(
+                node=start,
+                condition=ChoiceCondition(
+                    operator=ConditionOperator.NUMERIC_GREATER_THAN, variable="$.output.score", value=5
+                ),
+            )
+        ],
+    )
+    flow = Flow(id="flow", nodes=[start, end])
+
+    copied = flow.clone()
+
+    copied_end = copied.nodes[1]
+    assert copied_end.depends[0].node is copied.nodes[0]
+    assert copied_end.depends[0].condition == end.depends[0].condition
+    assert copied_end.depends[0].condition is not end.depends[0].condition
+    copied_end.depends[0].condition.variable = "$.output.other"
+    assert end.depends[0].condition.variable == "$.output.score"
 
 
 def test_a_flow_copy_relinks_output_references_to_the_copied_nodes():

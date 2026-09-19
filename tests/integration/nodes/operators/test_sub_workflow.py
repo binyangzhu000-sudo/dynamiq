@@ -548,6 +548,41 @@ def test_a_missing_referenced_flow_is_a_loader_error(tmp_path):
         Workflow.from_yaml_file(str(path), init_components=True)
 
 
+def test_a_map_leaves_a_dependency_condition_that_reads_the_result_alone():
+    """An Output named `output` gated on `$.output.score`: run directly, under a Map, and directly again."""
+    start = Input(id="input", name="input")
+    end = Output(
+        id="output",
+        name="output",
+        depends=[
+            NodeDependency(
+                node=start,
+                condition=ChoiceCondition(
+                    operator=ConditionOperator.NUMERIC_GREATER_THAN, variable="$.output.score", value=5
+                ),
+            )
+        ],
+        input_transformer=InputTransformer(selector={"score": "$.input.output.score"}),
+    )
+    flow = Flow(id="gated-flow", nodes=[start, end])
+    config = RunnableConfig(callbacks=[])
+
+    before = Workflow(flow=flow).run(input_data={"score": 10}, config=config)
+    assert before.status == RunnableStatus.SUCCESS
+    assert before.output["output"]["output"] == {"score": 10}
+
+    batch = Map(id="batch", name="batch", node=SubWorkflow(id="sw", name="sw", flow=flow), max_workers=2)
+    result = batch.run(input_data={"input": [{"score": 10}, {"score": 20}]}, config=config)
+
+    assert result.status == RunnableStatus.SUCCESS
+    assert result.output["output"] == [{"score": 10}, {"score": 20}]
+    # The flow the Map copied is as it was: the gate still reads the result, and runs again.
+    assert end.depends[0].condition.variable == "$.output.score"
+    after = Workflow(flow=flow).run(input_data={"score": 10}, config=config)
+    assert after.status == RunnableStatus.SUCCESS
+    assert after.output["output"]["output"] == {"score": 10}
+
+
 def test_a_map_keeps_a_choice_gate_that_names_a_node_by_id():
     """Input → Choice on `$.start.output.score` → Pass → Output, cloned per Map item."""
     start = Input(id="start", name="start")

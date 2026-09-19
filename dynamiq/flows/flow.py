@@ -304,7 +304,8 @@ class Flow(CheckpointFlowMixin, BaseFlow):
 
         Each node is cloned without its dependencies and output references, which would otherwise
         clone their own copies of the nodes they point at, and both are then re-linked to the
-        copies. A flow reached again while it is being copied, which is what a workflow calling
+        copies; a dependency's condition is copied too, so nothing written on the copy reaches the
+        original. A flow reached again while it is being copied, which is what a workflow calling
         itself looks like, resolves to the copy in progress instead of an endless chain of copies.
         """
         memo = getattr(_cloning, "memo", None)
@@ -323,7 +324,14 @@ class Flow(CheckpointFlowMixin, BaseFlow):
             for node in self.nodes:
                 node_clone = node_clones[id(node)]
                 node_clone.depends = [
-                    dependency.model_copy(update={"node": node_clones.get(id(dependency.node), dependency.node)})
+                    dependency.model_copy(
+                        update={
+                            "node": node_clones.get(id(dependency.node), dependency.node),
+                            "condition": (
+                                dependency.condition.model_copy(deep=True) if dependency.condition is not None else None
+                            ),
+                        }
+                    )
                     for dependency in node.depends
                 ]
                 node_clone.input_mapping = {
