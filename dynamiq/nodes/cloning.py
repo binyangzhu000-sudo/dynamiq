@@ -9,7 +9,7 @@ id-keyed config field only has to be handled once.
 """
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -43,6 +43,7 @@ def regenerate_node_ids(obj: Any, id_map: dict[str, set[str]] | None = None) -> 
     option_ids: dict[str, str] = {}
     _regenerate_ids(obj, id_map, node_ids, option_ids, seen=set())
     _remap_transformer_paths(obj, node_ids)
+    _remap_choice_conditions(obj, node_ids)
     _remap_dependency_options(obj, option_ids)
     return obj
 
@@ -91,23 +92,43 @@ def _regenerate_ids(
     return obj
 
 
+def _path_renamer(renamed: dict[str, str]) -> Callable[[Any], Any]:
+    """A function rewriting `$.<old id>` at the head of a path to the quoted new id.
+
+    An id already quoted by an earlier pass, as under a Map inside a Map, is matched too. The new id is
+    quoted because a generated id may start with a digit or hold a dash, which a bare field cannot.
+    """
+    pattern = re.compile(r'\$\."?(' + "|".join(re.escape(old) for old in renamed) + r')"?(?=\.|$|\s|\|)')
+
+    def rename(path: Any) -> Any:
+        return pattern.sub(lambda match: f'$."{renamed[match.group(1)]}"', path) if isinstance(path, str) else path
+
+    return rename
+
+
 def _remap_transformer_paths(obj: Any, renamed: dict[str, str]) -> None:
     # Imported here: the node module is the one that imports this package's operators.
     from dynamiq.nodes.node import Transformer
 
     if not renamed:
         return
-    # An id already quoted by an earlier pass, as under a Map inside a Map, is matched too.
-    pattern = re.compile(r'\$\."?(' + "|".join(re.escape(old) for old in renamed) + r')"?(?=\.|$|\s|\|)')
-
-    # Quoted, because a generated id may start with a digit or hold a dash, which a bare field cannot.
-    def rename(path: Any) -> Any:
-        return pattern.sub(lambda match: f'$."{renamed[match.group(1)]}"', path) if isinstance(path, str) else path
-
+    rename = _path_renamer(renamed)
     for transformer in (model for model in _models(obj) if isinstance(model, Transformer)):
         transformer.path = rename(transformer.path)
         if transformer.selector:
             transformer.selector = {key: rename(value) for key, value in transformer.selector.items()}
+
+
+def _remap_choice_conditions(obj: Any, renamed: dict[str, str]) -> None:
+    from dynamiq.nodes.types import ChoiceCondition
+
+    if not renamed:
+        return
+    # A condition reads the same node-id-keyed input a transformer selector does, so a gate that names
+    # a node by id would otherwise resolve against an id no node in the copy carries.
+    rename = _path_renamer(renamed)
+    for condition in (model for model in _models(obj) if isinstance(model, ChoiceCondition)):
+        condition.variable = rename(condition.variable)
 
 
 def _remap_dependency_options(obj: Any, renamed: dict[str, str]) -> None:

@@ -4,6 +4,7 @@ from dynamiq.nodes.cloning import regenerate_node_ids
 from dynamiq.nodes.node import NodeDependency, NodeOutputReference
 from dynamiq.nodes.operators import Choice, ChoiceOption, DecisionTable, Pass, SubWorkflow
 from dynamiq.nodes.types import ChoiceCondition, ConditionOperator, DecisionRule, NamedField
+from dynamiq.nodes.utils import Input
 
 
 def test_a_node_reachable_twice_gets_one_new_id_and_id_paths_follow_it():
@@ -65,6 +66,37 @@ def test_a_dependency_gated_on_a_choice_option_follows_the_option_id():
     assert cloned_route.options[0].id != "opt-hi"
     assert cloned_hi.depends[0].option == cloned_route.options[0].id
     assert hi.depends[0].option == "opt-hi"
+
+
+def test_a_choice_condition_naming_a_node_by_id_follows_the_new_id():
+    start = Input(id="start", name="start")
+    route = Choice(
+        id="route",
+        name="route",
+        options=[
+            ChoiceOption(
+                id="opt-hi",
+                condition=ChoiceCondition(
+                    operands=[
+                        ChoiceCondition(
+                            operator=ConditionOperator.NUMERIC_GREATER_THAN, variable="$.start.output.score", value=50
+                        )
+                    ],
+                    operator=ConditionOperator.AND,
+                ),
+            ),
+            ChoiceOption(id="opt-lo"),
+        ],
+        depends=[NodeDependency(node=start)],
+    )
+    node = SubWorkflow(id="sub", name="sub", flow=Flow(id="flow", nodes=[start, route]))
+
+    clone = regenerate_node_ids(node.clone(), {})
+
+    cloned_start, cloned_route = clone.flow.nodes
+    assert cloned_start.id != "start"
+    assert cloned_route.options[0].condition.operands[0].variable == f'$."{cloned_start.id}".output.score'
+    assert route.options[0].condition.operands[0].variable == "$.start.output.score"
 
 
 def test_a_flow_copy_relinks_output_references_to_the_copied_nodes():

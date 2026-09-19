@@ -177,11 +177,14 @@ def read_paths(expression: str) -> Reads:
 
 
 def _private_segment(paths: list[str]) -> str | None:
-    """The first path that reads a name starting with an underscore, or None."""
+    """The first path with a Python-internal segment (`__class__`), which the sandbox refuses on any object.
+
+    A single leading underscore is left alone: `_id` or `_source` are ordinary keys of a record from a
+    document store, and the sandbox reads them from a dict as it reads any key.
+    """
     for path in paths:
-        for part in _split_path(path):
-            if isinstance(part, str) and part.startswith("_"):
-                return path
+        if any(segment.startswith("__") for segment in re.split(r"[.\[]", path)):
+            return path
     return None
 
 
@@ -430,6 +433,7 @@ class Rules(Node):
             compiled.effective_until and as_of > compiled.effective_until
         ):
             finding["status"] = STATUS_NOT_APPLICABLE
+            finding["message"] = f"not in force on {as_of.isoformat()}: effective {self._window(rule)}"
             return finding
 
         status, reason = self._status(compiled, scope)
@@ -437,11 +441,19 @@ class Rules(Node):
         if status != STATUS_NOT_APPLICABLE:
             reads = compiled.check_reads.required + compiled.check_reads.optional
             finding["evaluated"] = {path: _shown(resolve_path(scope, path)) for path in reads}
-        if status == STATUS_NOT_EVALUATED:
+        # A finding that did not fire still says why: a reviewer reading the list should never have
+        # to re-run the record to learn which condition or date kept a rule out.
+        if status in (STATUS_NOT_EVALUATED, STATUS_NOT_APPLICABLE):
             finding["message"] = reason
-        elif status != STATUS_PASSED and status != STATUS_NOT_APPLICABLE:
+        elif status != STATUS_PASSED:
             finding["message"] = self._render(compiled, scope, reason)
         return finding
+
+    @staticmethod
+    def _window(rule: Rule) -> str:
+        if rule.effective_from and rule.effective_until:
+            return f"from {rule.effective_from} to {rule.effective_until}"
+        return f"from {rule.effective_from}" if rule.effective_from else f"until {rule.effective_until}"
 
     def _status(self, compiled: CompiledRule, scope: dict[str, Any]) -> tuple[str, str | None]:
         if compiled.applies is not None:
@@ -452,7 +464,8 @@ class Rules(Node):
             except EVALUATION_ERRORS as e:
                 return self._missing_status(compiled, f"applies_when could not be evaluated: {e}")
             if not applies:
-                return STATUS_NOT_APPLICABLE, None
+                return STATUS_NOT_APPLICABLE, f"does not apply: {compiled.rule.applies_when.strip()}"
+
         if missing := self._missing(compiled.check_reads.required, scope):
             return self._missing_status(compiled, f"missing value for {missing}")
         try:

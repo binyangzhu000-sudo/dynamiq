@@ -12,7 +12,7 @@ from dynamiq.nodes import InputTransformer, Node, NodeGroup
 from dynamiq.nodes.agents import Agent
 from dynamiq.nodes.llms import OpenAI
 from dynamiq.nodes.node import ErrorHandling, NodeDependency, NodeOutputReference
-from dynamiq.nodes.operators import Choice, ChoiceOption, DecisionTable, Expression, Map, SubWorkflow
+from dynamiq.nodes.operators import Choice, ChoiceOption, DecisionTable, Expression, Map, Pass, SubWorkflow
 from dynamiq.nodes.types import (
     ChoiceCondition,
     ConditionOperator,
@@ -546,3 +546,42 @@ def test_a_missing_referenced_flow_is_a_loader_error(tmp_path):
 
     with pytest.raises(Exception, match="Flow 'missing-flow' for node 'check' not found"):
         Workflow.from_yaml_file(str(path), init_components=True)
+
+
+def test_a_map_keeps_a_choice_gate_that_names_a_node_by_id():
+    """Input → Choice on `$.start.output.score` → Pass → Output, cloned per Map item."""
+    start = Input(id="start", name="start")
+    route = Choice(
+        id="route",
+        name="route",
+        options=[
+            ChoiceOption(
+                id="opt-hi",
+                name="hi",
+                condition=ChoiceCondition(
+                    operator=ConditionOperator.NUMERIC_GREATER_THAN, variable="$.start.output.score", value=50
+                ),
+            ),
+            ChoiceOption(id="opt-lo", name="lo"),
+        ],
+        depends=[NodeDependency(node=start)],
+    )
+    hi = Pass(
+        id="hi",
+        name="hi",
+        depends=[NodeDependency(node=route, option="opt-hi")],
+        input_transformer=InputTransformer(selector={"score": "$.start.output.score"}),
+    )
+    end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(node=hi)],
+        input_transformer=InputTransformer(selector={"score": "$.hi.output.score"}),
+    )
+    review = SubWorkflow(id="review", name="review", flow=Flow(id="review-flow", nodes=[start, route, hi, end]))
+    batch = Map(id="batch", name="batch", node=review, max_workers=2)
+
+    result = batch.run(input_data={"input": [{"score": 90}, {"score": 95}]}, config=RunnableConfig(callbacks=[]))
+
+    assert result.status == RunnableStatus.SUCCESS
+    assert result.output["output"] == [{"score": 90}, {"score": 95}]

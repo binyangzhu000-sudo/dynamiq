@@ -38,6 +38,14 @@ def statuses(output: dict) -> dict[str, str]:
     return {rule_id: finding["status"] for rule_id, finding in by_id(output).items()}
 
 
+def messages(output: dict) -> dict[str, str | None]:
+    return {finding["rule_id"]: finding["message"] for finding in output["findings"]}
+
+
+def reason_codes(output: dict) -> list[str]:
+    return [finding["reason_code"] for finding in output["findings"] if finding["status"] in ("fail", "warn")]
+
+
 # --- Insurance: a motor claim adjudicated against the policy and the claimant's history --------------------
 
 
@@ -618,6 +626,21 @@ def test_a_rule_that_reaches_for_python_internals_is_refused_when_the_node_is_bu
         )
 
 
+def test_a_record_key_with_one_leading_underscore_is_ordinary_data():
+    # A document store hands back `_id` and `_source`; only Python internals are refused.
+    node = Rules(
+        id="x",
+        name="x",
+        input_fields=[NamedField(name="record")],
+        rules=[Rule(id="r", name="has id", check="record._id != '' and record._source.status == 'ok'")],
+    )
+
+    output = run(node, {"record": {"_id": "abc", "_source": {"status": "ok"}}})
+
+    assert output["status"] == "pass"
+    assert output["findings"][0]["evaluated"] == {"record._id": "abc", "record._source.status": "ok"}
+
+
 def test_an_escape_through_a_filter_fails_the_run_instead_of_running():
     node = Rules(
         id="x",
@@ -667,3 +690,257 @@ def test_five_hundred_rules_cost_milliseconds_per_record_and_a_batch_runs_per_re
     assert [item["summary"]["fail"] for item in result.output["output"]] == [500 * 9 // 20] * 16
     # The batch is bounded by the serial cost measured on this machine, so it never depends on core count.
     assert elapsed < max(5.0, per_record * 16 * 3), f"16 records took {elapsed:.1f}s, one took {per_record:.3f}s"
+
+
+# --- Customs: a broker checks an import declaration before it is lodged ---------------------------
+
+
+def customs_checks() -> Rules:
+    return Rules(
+        id="customs",
+        name="customs",
+        input_fields=[
+            NamedField(name="declaration"),
+            NamedField(name="documents"),
+            NamedField(name="tariff"),
+            NamedField(name="restricted"),
+            NamedField(name="as_of"),
+        ],
+        derived_values=[
+            DerivedValue(name="declared_value", expression="declaration.lines | map(attribute='value') | sum"),
+            DerivedValue(
+                name="unknown_codes",
+                expression="declaration.lines | map(attribute='hs_code') | reject('in', tariff) | list",
+            ),
+            DerivedValue(
+                name="restricted_lines",
+                expression="declaration.lines | selectattr('hs_code', 'in', restricted) | list",
+            ),
+        ],
+        rules=[
+            Rule(
+                id="REG-01",
+                name="Importer registration valid on the lodgement date",
+                check="date(declaration.importer.registered_until) >= date(as_of)",
+                message="Registration lapsed on {{ declaration.importer.registered_until }}",
+                reason_code="REG-01",
+            ),
+            Rule(id="DOC-01", name="Commercial invoice attached", check="has(documents.invoice)", reason_code="DOC-01"),
+            Rule(id="DOC-02", name="Packing list attached", check="has(documents.packing_list)", reason_code="DOC-02"),
+            Rule(
+                id="DOC-03",
+                name="Certificate of origin for a preferential origin claim",
+                applies_when="declaration.preferential_origin_claimed",
+                check="has(documents.certificate_of_origin)",
+                reason_code="DOC-03",
+            ),
+            Rule(
+                id="HS-01",
+                name="Every line carries a tariff code the schedule knows",
+                check="(unknown_codes | length) == 0",
+                message="Unknown tariff codes: {{ unknown_codes | join(', ') }}",
+                reason_code="HS-01",
+            ),
+            Rule(
+                id="HS-02",
+                name="Restricted goods carry an import permit",
+                applies_when="(restricted_lines | length) > 0",
+                check="has(documents.permit)",
+                message="{{ restricted_lines | length }} restricted line(s) and no permit",
+                reason_code="HS-02",
+            ),
+            Rule(
+                id="VAL-01",
+                name="Invoice total matches the declared value",
+                check="abs(documents.invoice.total - declared_value) <= 1",
+                message="Invoice {{ documents.invoice.total }}, declared {{ declared_value }}",
+                reason_code="VAL-01",
+            ),
+            Rule(
+                id="VAL-02",
+                name="Unit value at or above the reference price",
+                severity="warn",
+                check=(
+                    "declared_value / (declaration.lines | map(attribute='quantity') | sum)"
+                    " >= tariff[declaration.lines[0].hs_code].reference_unit_value"
+                ),
+                reason_code="VAL-02",
+                tags=["valuation"],
+            ),
+        ],
+    )
+
+
+TARIFF = {
+    "8471.30": {"duty_rate": 0.0, "reference_unit_value": 300},
+    "2208.30": {"duty_rate": 0.5, "reference_unit_value": 20},
+}
+
+
+def declaration(lines: list[dict], **over) -> dict:
+    return {
+        "declaration": {
+            "importer": {"id": "IMP-4471", "registered_until": "2027-03-31"},
+            "preferential_origin_claimed": False,
+            "lines": lines,
+            **over,
+        },
+        "documents": {"invoice": {"total": sum(line["value"] for line in lines)}, "packing_list": {"pages": 2}},
+        "tariff": TARIFF,
+        "restricted": ["2208.30"],
+        "as_of": "2026-09-19",
+    }
+
+
+def test_a_complete_declaration_of_known_goods_is_cleared():
+    output = run(customs_checks(), declaration([{"hs_code": "8471.30", "value": 24000, "quantity": 40}]))
+
+    assert output["status"] == "pass"
+    assert output["derived"]["declared_value"] == 24000 and output["derived"]["unknown_codes"] == []
+    assert statuses(output)["DOC-03"] == "not_applicable" and statuses(output)["HS-02"] == "not_applicable"
+
+
+def test_restricted_goods_without_a_permit_and_an_unknown_code_are_both_named():
+    lines = [
+        {"hs_code": "2208.30", "value": 5000, "quantity": 200},
+        {"hs_code": "9999.99", "value": 800, "quantity": 10},
+    ]
+    output = run(customs_checks(), declaration(lines))
+
+    assert output["status"] == "fail"
+    assert statuses(output)["HS-02"] == "fail" and statuses(output)["HS-01"] == "fail"
+    assert messages(output)["HS-01"] == "Unknown tariff codes: 9999.99"
+    assert messages(output)["HS-02"] == "1 restricted line(s) and no permit"
+    assert statuses(output)["VAL-02"] == "pass"
+
+
+def test_a_preferential_origin_claim_needs_its_certificate_and_the_invoice_must_match():
+    record = declaration([{"hs_code": "8471.30", "value": 24000, "quantity": 40}], preferential_origin_claimed=True)
+    record["documents"]["invoice"]["total"] = 22000
+    output = run(customs_checks(), record)
+
+    assert output["status"] == "fail"
+    assert statuses(output)["DOC-03"] == "fail"
+    assert messages(output)["VAL-01"] == "Invoice 22000, declared 24000"
+    assert set(reason_codes(output)) == {"DOC-03", "VAL-01"}
+
+
+# --- Mobility: a ride-hailing platform onboards a driver under per-city policy --------------------
+
+
+def driver_onboarding() -> Rules:
+    return Rules(
+        id="onboarding",
+        name="onboarding",
+        input_fields=[NamedField(name="driver"), NamedField(name="policy"), NamedField(name="as_of")],
+        derived_values=[
+            DerivedValue(name="city_policy", expression="policy.cities[driver.city]"),
+            DerivedValue(name="age", expression="days_between(driver.dob, as_of) // 365"),
+        ],
+        rules=[
+            Rule(
+                id="LIC-01",
+                name="Licence valid on the onboarding date",
+                check="date(driver.licence.expires) >= date(as_of)",
+                reason_code="LIC-01",
+            ),
+            Rule(
+                id="LIC-02",
+                name="Licence class allowed in the city",
+                check="driver.licence.category in city_policy.licence_classes",
+                message="Class {{ driver.licence.category }} is not accepted in {{ driver.city }}",
+                reason_code="LIC-02",
+            ),
+            Rule(
+                id="AGE-01",
+                name="Minimum age for the city",
+                check="age >= city_policy.min_age",
+                message="Driver is {{ age }}, the city requires {{ city_policy.min_age }}",
+                reason_code="AGE-01",
+            ),
+            Rule(
+                id="BGC-01",
+                name="Background check cleared",
+                check="driver.background_check.result == 'clear'",
+                reason_code="BGC-01",
+            ),
+            Rule(
+                id="BGC-02",
+                name="Background check within twelve months",
+                severity="warn",
+                check="days_between(driver.background_check.date, as_of) <= 365",
+                reason_code="BGC-02",
+            ),
+            Rule(
+                id="VEH-01",
+                name="Vehicle year within the city minimum",
+                check="driver.vehicle.year >= city_policy.min_vehicle_year",
+                message="{{ driver.vehicle.year }} is older than the {{ city_policy.min_vehicle_year }} minimum",
+                reason_code="VEH-01",
+            ),
+            Rule(
+                id="VEH-02",
+                name="Electric vehicle required",
+                applies_when="city_policy.electric_only",
+                check="driver.vehicle.is_electric",
+                reason_code="VEH-02",
+                effective_from="2027-01-01",
+            ),
+        ],
+    )
+
+
+CITY_POLICY = {
+    "cities": {
+        "DXB": {"min_age": 21, "licence_classes": ["3", "5"], "min_vehicle_year": 2019, "electric_only": True},
+        "RUH": {
+            "min_age": 20,
+            "licence_classes": ["private", "public"],
+            "min_vehicle_year": 2018,
+            "electric_only": False,
+        },
+    }
+}
+
+
+def driver(**over) -> dict:
+    return {
+        "driver": {
+            "city": "DXB",
+            "dob": "1998-04-12",
+            "licence": {"category": "3", "expires": "2028-01-31"},
+            "background_check": {"result": "clear", "date": "2026-06-01"},
+            "vehicle": {"year": 2021, "is_electric": False},
+            **over,
+        },
+        "policy": CITY_POLICY,
+        "as_of": "2026-09-19",
+    }
+
+
+def test_a_driver_who_meets_the_city_policy_is_approved_and_next_years_rule_waits():
+    output = run(driver_onboarding(), driver())
+
+    assert output["status"] == "pass"
+    assert output["derived"]["age"] == 28
+    assert statuses(output)["VEH-02"] == "not_applicable"
+
+    output = run(driver_onboarding(), {**driver(), "as_of": "2027-02-01"})
+    assert statuses(output)["VEH-02"] == "fail" and output["status"] == "fail"
+
+
+def test_the_same_driver_is_judged_by_the_policy_of_the_city_applied_for():
+    too_young = driver(dob="2006-01-15", licence={"category": "3", "expires": "2028-01-31"})
+    assert statuses(run(driver_onboarding(), too_young))["AGE-01"] == "fail"
+
+    riyadh = driver(city="RUH", dob="2006-01-15", licence={"category": "public", "expires": "2028-01-31"})
+    output = run(driver_onboarding(), riyadh)
+    assert statuses(output)["AGE-01"] == "pass" and statuses(output)["LIC-02"] == "pass"
+
+
+def test_a_city_the_policy_does_not_cover_is_held_rather_than_approved():
+    output = run(driver_onboarding(), driver(city="CAI"))
+
+    assert output["status"] == "not_evaluated"
+    assert output["derived"]["city_policy"] is None
+    assert statuses(output)["LIC-02"] == "not_evaluated" and statuses(output)["BGC-01"] == "pass"
