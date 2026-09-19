@@ -191,6 +191,53 @@ def test_a_null_value_counts_as_missing():
     assert statuses(output)["CR-014"] == "not_evaluated"
 
 
+def test_a_has_guard_lets_the_check_decide_about_the_guarded_document():
+    node = Rules(
+        id="flood",
+        name="flood",
+        input_fields=[NamedField(name="docs")],
+        rules=[
+            Rule(
+                id="DC-211",
+                name="Flood certificate names a high-risk zone",
+                check="has(docs.FloodCert) and docs.FloodCert.zone in ['A', 'AE', 'V']",
+                message="Zone {{ docs.FloodCert.zone }} on the certificate",
+            )
+        ],
+    )
+
+    with_cert = run_node(node, {"docs": {"FloodCert": {"zone": "AE"}}}).output["findings"][0]
+    without = run_node(node, {"docs": {}}).output["findings"][0]
+    unzoned = run_node(node, {"docs": {"FloodCert": {}}}).output["findings"][0]
+
+    assert with_cert["status"] == "pass"
+    # The guard decides: no certificate is a failed check, not a value nobody could read.
+    assert without["status"] == "fail"
+    assert without["message"] == "Zone  on the certificate"
+    assert without["evaluated"] == {"docs.FloodCert": None, "docs.FloodCert.zone": None}
+    # A certificate without a zone is neither: the guard holds and the read finds nothing.
+    assert unzoned["status"] == "not_evaluated"
+
+
+def test_an_upstream_key_named_like_a_derived_value_does_not_break_the_next_one():
+    node = Rules(
+        id="bands",
+        name="bands",
+        input_fields=[NamedField(name="fico")],
+        derived_values=[
+            DerivedValue(name="ratio", expression="fico / 1000"),
+            DerivedValue(name="band", expression="'A' if ratio >= 0.7 else 'B'"),
+        ],
+        rules=[Rule(id="r1", name="Band A", check="band == 'A'")],
+    )
+
+    # The upstream payload carries `ratio` too, undeclared; the derived value wins, as it does in the checks.
+    output = run_node(node, {"fico": 720, "ratio": 0.1}).output
+
+    assert output["derived"] == {"ratio": 0.72, "band": "A"}
+    assert output["findings"][0]["status"] == "pass"
+
+
 def test_a_check_that_cannot_be_evaluated_is_a_finding_to_review():
     docs = {**DOCS, "Appraisal": {"effective_date": "March"}}
 

@@ -21,6 +21,14 @@ from dynamiq.nodes.operators.rules import days_between, has, read_paths, resolve
         ("items[0].amount > 0 and items['first'].amount > 0", ["items[0].amount", "items.first.amount"], []),
         ("ltv <= 0.8 and ltv > 0", ["ltv"], []),
         ("len(docs.pages) > 3", ["docs.pages"], []),
+        # A read under a guarded path is the guard's to decide, so it must not block the check.
+        (
+            "has(docs.FloodCert) and docs.FloodCert.zone in ['A', 'V']",
+            [],
+            ["docs.FloodCert", "docs.FloodCert.zone"],
+        ),
+        ("zone is defined and zone != 'A'", [], ["zone"]),
+        ("has(items[0]) and items[0].amount > 0 and total > 0", ["total"], ["items[0]", "items[0].amount"]),
     ],
 )
 def test_read_paths_tells_required_from_optional(expression, required, optional):

@@ -152,14 +152,27 @@ def _collect_paths(node: nodes.Node, reads: Reads, required: bool) -> None:
         _collect_paths(child, reads, required)
 
 
+def _is_under(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(prefix + ".") or path.startswith(prefix + "[")
+
+
 def read_paths(expression: str) -> Reads:
     """The paths an expression reads, in order of appearance.
 
     A path the expression only asks `has`, `is defined` or `default` about is optional: it may be missing
-    without stopping the evaluation. Every other path is required.
+    without stopping the evaluation, and so may anything read under it, since `has(docs.FloodCert) and
+    docs.FloodCert.zone == 'A'` is how a check guards a read; the guard decides, not a pre-check. Every other
+    path is required.
     """
-    reads = Reads(required=[], optional=[])
-    _collect_paths(_ENVIRONMENT.parse("{{ " + expression + " }}"), reads, required=True)
+    collected = Reads(required=[], optional=[])
+    _collect_paths(_ENVIRONMENT.parse("{{ " + expression + " }}"), collected, required=True)
+    reads = Reads(required=[], optional=list(collected.optional))
+    for path in collected.required:
+        if any(_is_under(path, optional) for optional in collected.optional):
+            if path not in reads.optional:
+                reads.optional.append(path)
+        else:
+            reads.required.append(path)
     return reads
 
 
@@ -353,8 +366,10 @@ class Rules(Node):
         as_of = self._as_of(context.get(AS_OF_KEY))
         derived: dict[str, Any] = {}
         for name, expression in self._derived:
+            # One mapping, derived winning: an undeclared key the upstream payload happens to carry under a
+            # derived value's name would otherwise clash as a duplicate keyword argument.
             try:
-                derived[name] = expression(**context, **derived)
+                derived[name] = expression(**{**context, **derived})
             except EVALUATION_ERRORS:
                 derived[name] = None
         scope = {**context, **derived}
