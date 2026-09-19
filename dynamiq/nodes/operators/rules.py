@@ -176,6 +176,15 @@ def read_paths(expression: str) -> Reads:
     return reads
 
 
+def _private_segment(paths: list[str]) -> str | None:
+    """The first path that reads a name starting with an underscore, or None."""
+    for path in paths:
+        for part in _split_path(path):
+            if isinstance(part, str) and part.startswith("_"):
+                return path
+    return None
+
+
 def _split_path(path: str) -> list[str | int]:
     parts: list[str | int] = []
     for piece in path.split("."):
@@ -294,9 +303,14 @@ class Rules(Node):
 
     def _compile_expression(self, text: str, where: str) -> Callable[..., Any]:
         try:
-            return _ENVIRONMENT.compile_expression(text, undefined_to_none=True)
+            reads = read_paths(text)
+            compiled = _ENVIRONMENT.compile_expression(text, undefined_to_none=True)
         except TemplateSyntaxError as e:
             raise ValueError(f"{where} is not a valid expression: {e}") from e
+        # The sandbox refuses these at run time; refusing them at build time names the rule instead of holding it.
+        if private := _private_segment(reads.required + reads.optional):
+            raise ValueError(f"{where} reads a private attribute ({private})")
+        return compiled
 
     def _compile_derived(self) -> list[tuple[str, Callable[..., Any]]]:
         taken = {field.name for field in self.input_fields}
