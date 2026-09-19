@@ -82,10 +82,23 @@ HELPERS: dict[str, Callable[..., Any]] = {
     "round": round,
 }
 
-# One sandbox for every Rules node. A missing attribute stays undefined instead of raising, so a check can ask
-# `has(docs.FloodCert)` about a document that is not there; a comparison with an undefined value still raises,
-# which the node reports as a finding to review.
-_ENVIRONMENT = ImmutableSandboxedEnvironment(undefined=ChainableUndefined)
+
+class RuleUndefined(ChainableUndefined):
+    """A value that is not there.
+
+    Attribute and item access chain, so `has(docs.FloodCert.pages)` can ask about a document that is missing; a
+    comparison, a truth test, a count or a loop over the value raises instead, so a lookup such as
+    `limits[loan.program]` for a program the table lacks makes the rule not evaluated rather than quietly true or
+    false. Rendering it in a message gives an empty string.
+    """
+
+    __slots__ = ()
+    __eq__ = __ne__ = __bool__ = __hash__ = Undefined._fail_with_undefined_error
+    __len__ = __iter__ = __contains__ = Undefined._fail_with_undefined_error
+
+
+# One sandbox for every Rules node; the expressions it compiles are stateless.
+_ENVIRONMENT = ImmutableSandboxedEnvironment(undefined=RuleUndefined)
 _ENVIRONMENT.globals.update(HELPERS)
 
 
@@ -228,7 +241,8 @@ class Rules(Node):
     fails then, naming the rule.
 
     The output holds `findings` in rule order, a `summary` of statuses, `status` (`fail` if any rule failed,
-    else `warn` if any warned, else `pass`) and the `derived` values. An optional `as_of` input, an ISO date,
+    else `warn` if any warned, else `not_evaluated` if any rule could not be evaluated, else `pass`) and the
+    `derived` values. An optional `as_of` input, an ISO date,
     fixes the date the effective windows are compared with; without it the run date is used.
     """
 
@@ -349,8 +363,16 @@ class Rules(Node):
         summary = {status: 0 for status in STATUSES}
         for finding in findings:
             summary[finding["status"]] += 1
-        status = STATUS_FAIL if summary[STATUS_FAIL] else STATUS_WARN if summary[STATUS_WARN] else STATUS_PASSED
-        return {"status": status, "summary": summary, "findings": findings, "derived": derived}
+        return {"status": self._overall(summary), "summary": summary, "findings": findings, "derived": derived}
+
+    @staticmethod
+    def _overall(summary: dict[str, int]) -> str:
+        # A record passes only when every rule that applied was evaluated and held: a check that could not run
+        # is not a pass, or a caller routing on `status == "pass"` would clear a file whose screening never ran.
+        for status in (STATUS_FAIL, STATUS_WARN, STATUS_NOT_EVALUATED):
+            if summary[status]:
+                return status
+        return STATUS_PASSED
 
     @staticmethod
     def _as_of(value: Any) -> date:
