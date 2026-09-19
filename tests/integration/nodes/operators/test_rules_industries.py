@@ -18,8 +18,8 @@ from dynamiq import Workflow
 from dynamiq.flows import Flow
 from dynamiq.nodes import InputTransformer
 from dynamiq.nodes.node import NodeDependency
-from dynamiq.nodes.operators import Expression, Map, Rules
-from dynamiq.nodes.types import DerivedValue, ExpressionItem, NamedField, Rule
+from dynamiq.nodes.operators import DecisionTable, Expression, Map, Rules
+from dynamiq.nodes.types import DecisionRule, DerivedValue, ExpressionItem, NamedField, Rule
 from dynamiq.nodes.utils import Input, Output
 from dynamiq.runnables import RunnableConfig, RunnableStatus
 
@@ -955,3 +955,176 @@ def test_a_city_the_policy_does_not_cover_is_held_rather_than_approved():
     assert output["status"] == "not_evaluated"
     assert output["derived"]["city_policy"] is None
     assert statuses(output)["LIC-02"] == "not_evaluated" and statuses(output)["BGC-01"] == "pass"
+
+
+# --- Customer support: a ticket triaged by a table, screened by rules and routed to a queue -------------
+
+
+def support_triage() -> Workflow:
+    """A support desk's first pass: the table picks the queue and the SLA from the plan and the channel, the
+    rules screen what a human must see before the queue does, and the expression turns the SLA into a due time."""
+    start = Input(id="start", name="start")
+    queue = DecisionTable(
+        id="queue",
+        name="queue",
+        hit_policy="first",
+        input_columns=[
+            NamedField(name="plan", type="string"),
+            NamedField(name="channel", type="string"),
+            NamedField(name="sentiment", type="float"),
+        ],
+        output_columns=[NamedField(name="queue", type="string"), NamedField(name="sla_hours", type="int")],
+        rules=[
+            DecisionRule(id="q1", name="enterprise phone", when=["enterprise", "phone", ""], then=["tier2", "1"]),
+            DecisionRule(id="q2", name="enterprise", when=["enterprise", "", ""], then=["tier2", "4"]),
+            DecisionRule(id="q3", name="angry customer", when=["", "", "< -0.5"], then=["retention", "2"]),
+            DecisionRule(id="q4", name="everyone else", when=["", "", ""], then=["tier1", "24"]),
+        ],
+        depends=[NodeDependency(start)],
+        input_transformer=InputTransformer(
+            selector={
+                "plan": "$.start.output.customer.plan",
+                "channel": "$.start.output.ticket.channel",
+                "sentiment": "$.start.output.analysis.sentiment",
+            }
+        ),
+    )
+    screen = Rules(
+        id="screen",
+        name="screen",
+        input_fields=[NamedField(name="ticket"), NamedField(name="customer"), NamedField(name="analysis")],
+        derived_values=[DerivedValue(name="open_tickets", expression="customer.open_tickets | length")],
+        rules=[
+            Rule(
+                id="ESC-01",
+                name="Legal or regulator mentioned",
+                severity="fail",
+                check="not (analysis.topics | select('in', ['legal', 'regulator', 'chargeback']) | list)",
+                message="Ticket mentions {{ analysis.topics | join(', ') }}; route to a supervisor",
+                reason_code="ESC-01",
+            ),
+            Rule(
+                id="ESC-02",
+                name="Repeat contact on an open ticket",
+                severity="warn",
+                applies_when="open_tickets > 0",
+                check="ticket.subject not in (customer.open_tickets | map(attribute='subject') | list)",
+                message="The customer already has an open ticket with the same subject",
+                reason_code="ESC-02",
+            ),
+            Rule(
+                id="PII-01",
+                name="No card number in the ticket",
+                severity="fail",
+                check="not analysis.contains_card_number",
+                message="The ticket body carries a card number; redact before it reaches the queue",
+                reason_code="PII-01",
+            ),
+            Rule(
+                id="LANG-01",
+                name="Language the queue speaks",
+                severity="info",
+                check="ticket.language in ['en', 'ar']",
+                message="Ticket is in {{ ticket.language }}; a translation step is needed",
+            ),
+        ],
+        depends=[NodeDependency(start)],
+        input_transformer=InputTransformer(
+            selector={
+                "ticket": "$.start.output.ticket",
+                "customer": "$.start.output.customer",
+                "analysis": "$.start.output.analysis",
+            }
+        ),
+    )
+    due = Expression(
+        id="due",
+        name="due",
+        input_fields=[NamedField(name="opened_at"), NamedField(name="sla_hours"), NamedField(name="status")],
+        expressions=[
+            ExpressionItem(key="due_at", expression="date(opened_at) | string"),
+            ExpressionItem(key="hours", expression="sla_hours if status == 'pass' else 1"),
+            ExpressionItem(key="needs_human", expression="status != 'pass'"),
+        ],
+        depends=[NodeDependency(queue), NodeDependency(screen)],
+        input_transformer=InputTransformer(
+            selector={
+                "opened_at": "$.start.output.ticket.opened_at",
+                "sla_hours": "$.queue.output.sla_hours",
+                "status": "$.screen.output.status",
+            }
+        ),
+    )
+    end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(queue), NodeDependency(screen), NodeDependency(due)],
+        input_transformer=InputTransformer(
+            selector={
+                "queue": "$.queue.output.queue",
+                "hours": "$.due.output.hours",
+                "needs_human": "$.due.output.needs_human",
+                "findings": "$.screen.output.findings",
+                "status": "$.screen.output.status",
+            }
+        ),
+    )
+    return Workflow(flow=Flow(nodes=[start, queue, screen, due, end]))
+
+
+def ticket(**overrides) -> dict:
+    record = {
+        "ticket": {"subject": "Refund not received", "channel": "email", "language": "en", "opened_at": "2026-09-19"},
+        "customer": {"plan": "enterprise", "open_tickets": []},
+        "analysis": {"sentiment": 0.1, "topics": ["billing"], "contains_card_number": False},
+    }
+    for key, value in overrides.items():
+        record[key] = record[key] | value
+    return record
+
+
+def test_a_clean_enterprise_ticket_goes_to_tier_two_with_its_sla():
+    result = support_triage().run(input_data=ticket(), config=RunnableConfig(callbacks=[]))
+
+    assert result.status == RunnableStatus.SUCCESS, result.error
+    output = result.output["end"]["output"]
+    assert output["queue"] == "tier2" and output["hours"] == 4
+    assert output["status"] == "pass" and output["needs_human"] is False
+
+
+def test_an_angry_customer_mentioning_a_chargeback_is_held_for_a_supervisor():
+    record = ticket(
+        customer={"plan": "free", "open_tickets": [{"subject": "Refund not received"}]},
+        analysis={"sentiment": -0.8, "topics": ["billing", "chargeback"], "contains_card_number": True},
+    )
+
+    result = support_triage().run(input_data=record, config=RunnableConfig(callbacks=[]))
+
+    assert result.status == RunnableStatus.SUCCESS, result.error
+    output = result.output["end"]["output"]
+    # The table still says where the ticket belongs; the screen says a human sees it first, within the hour.
+    assert output["queue"] == "retention"
+    assert output["status"] == "fail" and output["needs_human"] is True and output["hours"] == 1
+    by_rule = {finding["rule_id"]: finding for finding in output["findings"]}
+    assert by_rule["ESC-01"]["status"] == "fail"
+    assert by_rule["ESC-01"]["message"] == "Ticket mentions billing, chargeback; route to a supervisor"
+    assert by_rule["ESC-02"]["status"] == "warn"
+    assert by_rule["PII-01"]["status"] == "fail"
+    assert [f["reason_code"] for f in output["findings"] if f["status"] in ("fail", "warn")] == [
+        "ESC-01",
+        "ESC-02",
+        "PII-01",
+    ]
+
+
+def test_a_ticket_in_another_language_is_only_noted():
+    record = ticket(ticket={"language": "fr"})
+
+    result = support_triage().run(input_data=record, config=RunnableConfig(callbacks=[]))
+
+    assert result.status == RunnableStatus.SUCCESS, result.error
+    output = result.output["end"]["output"]
+    by_rule = {finding["rule_id"]: finding for finding in output["findings"]}
+    assert by_rule["LANG-01"]["status"] == "info"
+    assert by_rule["ESC-02"]["status"] == "not_applicable"
+    assert output["status"] == "pass" and output["hours"] == 4

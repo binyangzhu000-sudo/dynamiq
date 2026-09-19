@@ -90,3 +90,26 @@ def test_yaml_round_trip(tmp_path):
     assert [item.key for item in node.expressions] == ["total", "tier", "items"]
     assert [field.name for field in node.input_fields] == ["price", "quantity"]
     assert loaded.run(input_data={"price": 2, "quantity": 3}).output["pricing"]["output"]["total"] == 6
+
+
+def test_the_rule_helpers_serve_an_expression_too():
+    node = Expression(
+        id="due",
+        name="due",
+        input_fields=[NamedField(name="opened_at"), NamedField(name="closed_at"), NamedField(name="sla_hours")],
+        expressions=[
+            ExpressionItem(key="age_days", expression="days_between(opened_at, closed_at)"),
+            ExpressionItem(key="opened", expression="date(opened_at) | string"),
+            ExpressionItem(key="has_sla", expression="has(sla_hours)"),
+            ExpressionItem(key="hours", expression="max(sla_hours or 0, 1)"),
+            ExpressionItem(key="is_today", expression="date(opened_at) == today()"),
+        ],
+    )
+
+    result = node.run(
+        input_data={"opened_at": "09/01/2026", "closed_at": "2026-09-19", "sla_hours": None},
+        config=RunnableConfig(callbacks=[]),
+    )
+
+    assert result.status == RunnableStatus.SUCCESS, result.error
+    assert result.output == {"age_days": 18, "opened": "2026-09-01", "has_sla": False, "hours": 1, "is_today": False}

@@ -8,12 +8,15 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from dynamiq.nodes import Node, NodeGroup
 from dynamiq.nodes.node import ensure_config
+from dynamiq.nodes.operators.rules import HELPERS
 from dynamiq.nodes.types import ExpressionItem, NamedField
 from dynamiq.runnables import RunnableConfig
 
 # One sandbox for every Expression node: it keeps no state, and it refuses attribute access that would
-# reach Python internals, so an expression cannot escape into the process.
+# reach Python internals, so an expression cannot escape into the process. The Rules node's helpers
+# serve an expression too: a due date or an age is a date computation over the same inputs.
 _ENVIRONMENT = ImmutableSandboxedEnvironment()
+_ENVIRONMENT.globals.update(HELPERS)
 
 
 class ExpressionInputSchema(BaseModel):
@@ -27,8 +30,10 @@ class Expression(Node):
     `'A' if score < 0.5 else 'B'`, `amount | round(2)`), compiled once in a sandboxed environment and
     evaluated with the inputs as its names. It returns the value itself, not rendered text. An input
     referred to on its own that is missing evaluates to None; using a missing input in arithmetic
-    fails the run, as does an expression that reaches for Python internals. The output holds one key
-    per expression, plus every input when `pass_through` is set, with expressions winning on a clash.
+    fails the run, as does an expression that reaches for Python internals. The helpers a rule can
+    call are available as well: `has`, `days_between`, `date`, `today`, `len`, `abs`, `min`, `max`,
+    `sum` and `round`. The output holds one key per expression, plus every input when `pass_through`
+    is set, with expressions winning on a clash.
     """
 
     name: str | None = "expression"
