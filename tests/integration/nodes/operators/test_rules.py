@@ -498,3 +498,54 @@ def test_a_record_key_with_a_dot_reads_through_the_subscript_form():
 
     assert statuses(output) == {"pages": "pass"}
     assert output["findings"][0]["evaluated"] == {"docs['Flood.Cert'].pages": 3}
+
+
+def test_a_record_key_named_self_does_not_stop_the_evaluation():
+    """A REST payload's top-level `self` link reaches the scope unfiltered and must be an ordinary key there."""
+    node = Rules(
+        name="amounts",
+        input_fields=[NamedField(name="amount")],
+        derived_values=[DerivedValue(name="doubled", expression="amount * 2")],
+        rules=[
+            Rule(
+                id="positive",
+                name="amount is positive",
+                applies_when="amount is defined",
+                check="amount > 0 and doubled == 6",
+                message="amount is {{ amount }}",
+            )
+        ],
+    )
+
+    output = run_node(node, {"self": "https://api/x/1", "amount": 3}).output
+
+    assert statuses(output) == {"positive": "pass"}
+    assert output["derived"] == {"doubled": 6}
+    assert output["status"] == "pass"
+
+
+def test_a_missing_value_under_the_strict_policy_never_reads_as_pass():
+    """An info rule reports `info` for a missing value, but the record's screening still did not run."""
+
+    def node(on_missing: str) -> Rules:
+        return Rules(
+            name="appraisal",
+            input_fields=[NamedField(name="docs")],
+            on_missing=on_missing,
+            rules=[
+                Rule(
+                    id="value", name="appraisal", severity="info", check="docs.appraisal.value > 0", message="appraisal"
+                )
+            ],
+        )
+
+    lenient = run_node(node("not_evaluated"), {"docs": {}}).output
+    strict = run_node(node("fail"), {"docs": {}}).output
+
+    assert statuses(lenient) == {"value": "not_evaluated"}
+    assert lenient["status"] == "not_evaluated"
+    assert statuses(strict) == {"value": "info"}
+    assert strict["findings"][0]["message"] == "appraisal (missing value for docs.appraisal.value)"
+    assert strict["status"] == "not_evaluated"
+    # A value that is there lets the rule decide, and the record reads as it should.
+    assert run_node(node("fail"), {"docs": {"appraisal": {"value": 5}}}).output["status"] == "pass"

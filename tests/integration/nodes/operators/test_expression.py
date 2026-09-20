@@ -113,3 +113,18 @@ def test_the_rule_helpers_serve_an_expression_too():
 
     assert result.status == RunnableStatus.SUCCESS, result.error
     assert result.output == {"age_days": 18, "opened": "2026-09-01", "has_sla": False, "hours": 1, "is_today": False}
+
+
+def test_an_input_named_self_does_not_stop_the_evaluation():
+    """A REST payload's top-level `self` link lands in the input dict and must be an ordinary key there."""
+    node = Expression(
+        name="pricing",
+        input_fields=[NamedField(name="amount")],
+        expressions=[ExpressionItem(key="doubled", expression="amount * 2")],
+        pass_through=True,
+    )
+
+    result = node.run(input_data={"self": "https://api/x/1", "amount": 3}, config=RunnableConfig(callbacks=[]))
+
+    assert result.status == RunnableStatus.SUCCESS
+    assert result.output == {"self": "https://api/x/1", "amount": 3, "doubled": 6}

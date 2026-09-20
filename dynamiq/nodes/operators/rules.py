@@ -400,10 +400,11 @@ class Rules(Node):
         as_of = self._as_of(context.get(AS_OF_KEY))
         derived: dict[str, Any] = {}
         for name, expression in self._derived:
-            # One mapping, derived winning: an undeclared key the upstream payload happens to carry under a
-            # derived value's name would otherwise clash as a duplicate keyword argument.
+            # One mapping, derived winning, passed positionally: an undeclared key the upstream payload carries
+            # under a derived value's name would otherwise clash as a duplicate keyword argument, and a key
+            # named `self` would collide with the compiled expression's own bound argument.
             try:
-                derived[name] = expression(**{**context, **derived})
+                derived[name] = expression({**context, **derived})
                 # A value the expression could not find is missing, and the output stays serializable.
                 if isinstance(derived[name], Undefined):
                     derived[name] = None
@@ -411,19 +412,33 @@ class Rules(Node):
                 derived[name] = None
         scope = {**context, **derived}
 
-        findings = [self._evaluate(compiled, scope, as_of) for compiled in self._compiled]
+        findings: list[dict[str, Any]] = []
+        screened = True
+        for compiled in self._compiled:
+            finding, evaluated = self._evaluate(compiled, scope, as_of)
+            findings.append(finding)
+            screened = screened and evaluated
         summary = {status: 0 for status in STATUSES}
         for finding in findings:
             summary[finding["status"]] += 1
-        return {"status": self._overall(summary), "summary": summary, "findings": findings, "derived": derived}
+        return {
+            "status": self._overall(summary, screened),
+            "summary": summary,
+            "findings": findings,
+            "derived": derived,
+        }
 
     @staticmethod
-    def _overall(summary: dict[str, int]) -> str:
+    def _overall(summary: dict[str, int], screened: bool) -> str:
         # A record passes only when every rule that applied was evaluated and held: a check that could not run
         # is not a pass, or a caller routing on `status == "pass"` would clear a file whose screening never ran.
-        for status in (STATUS_FAIL, STATUS_WARN, STATUS_NOT_EVALUATED):
+        # Under the strict policy such a check reports the rule's severity, which for an info rule counts for
+        # nothing here, so the record reads not evaluated rather than pass.
+        for status in (STATUS_FAIL, STATUS_WARN):
             if summary[status]:
                 return status
+        if summary[STATUS_NOT_EVALUATED] or not screened:
+            return STATUS_NOT_EVALUATED
         return STATUS_PASSED
 
     @staticmethod
@@ -435,7 +450,8 @@ class Rules(Node):
         except ValueError as e:
             raise ValueError(f"Rules: '{AS_OF_KEY}' is not a date: {value!r}") from e
 
-    def _evaluate(self, compiled: CompiledRule, scope: dict[str, Any], as_of: date) -> dict[str, Any]:
+    def _evaluate(self, compiled: CompiledRule, scope: dict[str, Any], as_of: date) -> tuple[dict[str, Any], bool]:
+        """The finding for one rule, and whether its check could run (a missing value or an error means it could not)."""
         rule = compiled.rule
         finding: dict[str, Any] = {
             "rule_id": rule.id,
@@ -454,9 +470,9 @@ class Rules(Node):
         ):
             finding["status"] = STATUS_NOT_APPLICABLE
             finding["message"] = f"not in force on {as_of.isoformat()}: effective {self._window(rule)}"
-            return finding
+            return finding, True
 
-        status, reason = self._status(compiled, scope)
+        status, reason, evaluated = self._status(compiled, scope)
         finding["status"] = status
         if status != STATUS_NOT_APPLICABLE:
             reads = compiled.check_reads.required + compiled.check_reads.optional
@@ -467,7 +483,7 @@ class Rules(Node):
             finding["message"] = reason
         elif status != STATUS_PASSED:
             finding["message"] = self._render(compiled, scope, reason)
-        return finding
+        return finding, evaluated
 
     @staticmethod
     def _window(rule: Rule) -> str:
@@ -475,29 +491,30 @@ class Rules(Node):
             return f"from {rule.effective_from} to {rule.effective_until}"
         return f"from {rule.effective_from}" if rule.effective_from else f"until {rule.effective_until}"
 
-    def _status(self, compiled: CompiledRule, scope: dict[str, Any]) -> tuple[str, str | None]:
+    def _status(self, compiled: CompiledRule, scope: dict[str, Any]) -> tuple[str, str | None, bool]:
+        """The rule's status, the reason when it did not run or did not apply, and whether its check ran."""
         if compiled.applies is not None:
             if missing := self._missing(compiled.applies_reads.required, scope):
                 return self._missing_status(compiled, f"missing value for {missing}")
             try:
-                applies = bool(compiled.applies(**scope))
+                applies = bool(compiled.applies(scope))
             except EVALUATION_ERRORS as e:
                 return self._missing_status(compiled, f"applies_when could not be evaluated: {e}")
             if not applies:
-                return STATUS_NOT_APPLICABLE, f"does not apply: {compiled.rule.applies_when.strip()}"
+                return STATUS_NOT_APPLICABLE, f"does not apply: {compiled.rule.applies_when.strip()}", True
 
         if missing := self._missing(compiled.check_reads.required, scope):
             return self._missing_status(compiled, f"missing value for {missing}")
         try:
-            holds = bool(compiled.check(**scope))
+            holds = bool(compiled.check(scope))
         except EVALUATION_ERRORS as e:
             return self._missing_status(compiled, f"check could not be evaluated: {e}")
-        return (STATUS_PASSED, None) if holds else (compiled.rule.severity.value, None)
+        return (STATUS_PASSED, None, True) if holds else (compiled.rule.severity.value, None, True)
 
-    def _missing_status(self, compiled: CompiledRule, reason: str) -> tuple[str, str]:
+    def _missing_status(self, compiled: CompiledRule, reason: str) -> tuple[str, str, bool]:
         if self.on_missing == RuleMissingPolicy.FAIL:
-            return compiled.rule.severity.value, reason
-        return STATUS_NOT_EVALUATED, reason
+            return compiled.rule.severity.value, reason, False
+        return STATUS_NOT_EVALUATED, reason, False
 
     @staticmethod
     def _missing(paths: list[str], scope: dict[str, Any]) -> str | None:
@@ -511,7 +528,7 @@ class Rules(Node):
         if compiled.message is None:
             return reason
         try:
-            rendered = compiled.message.render(**scope).strip()
+            rendered = compiled.message.render(scope).strip()
         except EVALUATION_ERRORS:
             rendered = compiled.rule.message.strip() if compiled.rule.message else ""
         if reason:

@@ -70,5 +70,7 @@ class Expression(Node):
         self.run_on_node_execute_run(config.callbacks, **{**kwargs, "parent_run_id": kwargs.get("run_id", uuid4())})
 
         context = input_data.model_dump()
-        computed = {key: expression(**context) for key, expression in self._compiled}
+        # The context goes in positionally: spread as keywords, an input named `self` would collide with the
+        # compiled expression's own bound argument and fail the run before anything is evaluated.
+        computed = {key: expression(context) for key, expression in self._compiled}
         return {**context, **computed} if self.pass_through else computed
