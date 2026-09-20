@@ -29,6 +29,11 @@ from dynamiq.nodes.operators.rules import days_between, has, read_paths, resolve
         ),
         ("zone is defined and zone != 'A'", [], ["zone"]),
         ("has(items[0]) and items[0].amount > 0 and total > 0", ["total"], ["items[0]", "items[0].amount"]),
+        # A method call reads the object it is called on and its arguments, not a member of the method's name.
+        ("invoice.get('vat_rate', 0) > 0", ["invoice"], []),
+        ("subject.lower().startswith('urgent')", ["subject"], []),
+        ("invoice['lines'].count(item) > 0 and (rec.keys() | list | length) > 0", ["invoice.lines", "item", "rec"], []),
+        ("has(invoice.get('vat_rate'))", [], ["invoice"]),
     ],
 )
 def test_read_paths_tells_required_from_optional(expression, required, optional):

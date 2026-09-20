@@ -149,6 +149,13 @@ def _collect_paths(node: nodes.Node, reads: Reads, required: bool) -> None:
         for argument in node.args:
             _collect_paths(argument, reads, required)
         return
+    # A method call reads the object it is called on, not a member of the method's name: `invoice.get('vat_rate')`
+    # needs `invoice`, and a dict holds no key called `get`.
+    if isinstance(node, nodes.Call) and isinstance(node.node, nodes.Getattr):
+        _collect_paths(node.node.node, reads, required)
+        for child in node.iter_child_nodes(exclude=("node",)):
+            _collect_paths(child, reads, required)
+        return
     path = _path_of(node)
     if path is not None:
         target = reads.required if required else reads.optional

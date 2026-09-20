@@ -443,6 +443,35 @@ def test_document_check_answers_feed_a_rule_with_a_confidence_threshold():
     assert unanswered["findings"][0]["status"] == "not_evaluated"
 
 
+def test_a_method_call_on_a_record_member_reads_the_member_not_the_method():
+    """`invoice.get('vat_rate', 0)` needs `invoice`: a dict holds no key called `get`, so the call used to read as a
+    missing value and the rule never ran, as a check and as a condition alike."""
+    node = Rules(
+        name="vat",
+        input_fields=[NamedField(name="invoice"), NamedField(name="rec")],
+        rules=[
+            Rule(id="VAT-01", name="VAT rate present", check="invoice.get('vat_rate', 0) > 0"),
+            Rule(
+                id="KND-01",
+                name="A kind-x record carries more than its kind",
+                applies_when="rec.get('kind') == 'x'",
+                check="(rec.keys() | list | length) > 1",
+            ),
+        ],
+    )
+
+    present = run_node(node, {"invoice": {"vat_rate": 0.2, "total": 100}, "rec": {"kind": "x", "n": 1}}).output
+    absent = run_node(node, {"invoice": {"total": 100}, "rec": {"kind": "y"}}).output
+    gone = run_node(node, {"rec": {"kind": "x", "n": 1}}).output
+
+    assert statuses(present) == {"VAT-01": "pass", "KND-01": "pass"}
+    assert present["findings"][0]["evaluated"] == {"invoice": "{…2 keys}"}
+    # The default passed to `get` stands in for the key, so the rule decides rather than waits for a reviewer.
+    assert statuses(absent) == {"VAT-01": "fail", "KND-01": "not_applicable"}
+    assert statuses(gone) == {"VAT-01": "not_evaluated", "KND-01": "pass"}
+    assert gone["findings"][0]["message"] == "missing value for invoice"
+
+
 def test_a_lookup_that_finds_nothing_is_not_evaluated_wherever_it_stands():
     """A bare `limits[program]` for a program the table lacks is a value nobody could read: as a check, as a
     condition, through a filter chain and as a derived value."""
