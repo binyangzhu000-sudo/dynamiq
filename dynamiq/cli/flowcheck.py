@@ -476,20 +476,27 @@ def validate(flow, known_types: set | None = None):
 
 
 def check_branch(source, source_id, option, label) -> list:
-    """A dependency's `option` names a branch of a Choice: one of its options, by id or by name."""
+    """A dependency's `option` names a branch of a Choice: one of its options, by id."""
     if not isinstance(source, dict) or source.get("type") != CHOICE_TYPE:
         return [
             f"node {label!r} depends on option {option!r} of {source_id!r}, which is not a Choice node. "
             "Only a Choice has branches; drop `option` or point it at the Choice."
         ]
     options = [o for o in (source.get("options") or []) if isinstance(o, dict)]
-    if not any(option in (o.get("id"), o.get("name")) for o in options):
-        names = ", ".join(str(o.get("id") or o.get("name")) for o in options) or "none"
+    if any(option == o.get("id") for o in options):
+        return []
+    # The runtime matches the option's id alone: a name would pass here and gate nothing there, so the
+    # branch's node would run whatever the Choice decided.
+    if by_name := next((o for o in options if option == o.get("name") and o.get("id")), None):
         return [
-            f"node {label!r} depends on option {option!r} of choice {source_id!r}, which has no such "
-            f"option (it has: {names}). Use the option's id."
+            f"node {label!r} depends on option {option!r} of choice {source_id!r} by its name; the runtime "
+            f"matches the option's id, so the branch would never gate it. Use {by_name['id']!r}."
         ]
-    return []
+    ids = ", ".join(str(o.get("id") or o.get("name")) for o in options) or "none"
+    return [
+        f"node {label!r} depends on option {option!r} of choice {source_id!r}, which has no such "
+        f"option (it has: {ids}). Use the option's id."
+    ]
 
 
 def check_operator(node, label) -> list:

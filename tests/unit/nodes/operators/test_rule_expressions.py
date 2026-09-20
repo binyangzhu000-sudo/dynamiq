@@ -73,3 +73,12 @@ def test_helpers_read_dates_in_the_shapes_documents_carry():
         to_date("August first")
     with pytest.raises(ValueError):
         days_between(None, "2026-08-01")
+
+
+def test_a_key_that_is_not_a_plain_name_stays_one_segment():
+    reads = read_paths("docs['Flood.Cert'].pages > 0 and docs['FloodCert'].pages > 0")
+    assert reads.required == ["docs['Flood.Cert'].pages", "docs.FloodCert.pages"]
+    assert resolve_path({"docs": {"Flood.Cert": {"pages": 3}}}, "docs['Flood.Cert'].pages") == 3
+    assert read_paths('docs["it\'s"].n > 0').required == ["docs['it\\'s'].n"]
+    assert resolve_path({"docs": {"it's": {"n": 1}}}, "docs['it\\'s'].n") == 1
+    assert resolve_path({"items": [{"name": "a"}]}, "items[0].name") == "a"

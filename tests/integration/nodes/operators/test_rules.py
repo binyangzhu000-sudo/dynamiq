@@ -441,3 +441,60 @@ def test_document_check_answers_feed_a_rule_with_a_confidence_threshold():
     assert confident["findings"][0]["message"] == "No borrower signature found on the Note (confidence 0.93)"
     assert unsure["findings"][0]["status"] == "not_applicable"
     assert unanswered["findings"][0]["status"] == "not_evaluated"
+
+
+def test_a_lookup_that_finds_nothing_is_not_evaluated_wherever_it_stands():
+    """A bare `limits[program]` for a program the table lacks is a value nobody could read: as a check, as a
+    condition, through a filter chain and as a derived value."""
+    node = Rules(
+        name="limits",
+        input_fields=[NamedField(name="policy"), NamedField(name="claim"), NamedField(name="things")],
+        derived_values=[DerivedValue(name="limit", expression="policy.limits[claim.loss_type]")],
+        rules=[
+            Rule(id="check", name="covered", check="policy.limits[claim.loss_type]"),
+            Rule(
+                id="applies",
+                name="conditional",
+                applies_when="policy.limits[claim.loss_type]",
+                check="claim.amount > 0",
+            ),
+            Rule(id="chain", name="first thing", check="things | selectattr('kind', 'equalto', 'x') | first"),
+            Rule(id="derived", name="within the limit", check="claim.amount <= limit"),
+        ],
+    )
+    missing = run_node(
+        node,
+        {"policy": {"limits": {"fire": 5000}}, "claim": {"loss_type": "theft", "amount": 10}, "things": []},
+    ).output
+    present = run_node(
+        node,
+        {
+            "policy": {"limits": {"theft": 5000}},
+            "claim": {"loss_type": "theft", "amount": 10},
+            "things": [{"kind": "x"}],
+        },
+    ).output
+
+    assert statuses(missing) == {
+        "check": "not_evaluated",
+        "applies": "not_evaluated",
+        "chain": "not_evaluated",
+        "derived": "not_evaluated",
+    }
+    assert missing["status"] == "not_evaluated"
+    assert missing["derived"] == {"limit": None}
+    assert statuses(present) == {"check": "pass", "applies": "pass", "chain": "pass", "derived": "pass"}
+    assert present["derived"] == {"limit": 5000}
+
+
+def test_a_record_key_with_a_dot_reads_through_the_subscript_form():
+    node = Rules(
+        name="documents",
+        input_fields=[NamedField(name="docs")],
+        rules=[Rule(id="pages", name="certificate has pages", check="docs['Flood.Cert'].pages > 0")],
+    )
+
+    output = run_node(node, {"docs": {"Flood.Cert": {"pages": 3}}}).output
+
+    assert statuses(output) == {"pages": "pass"}
+    assert output["findings"][0]["evaluated"] == {"docs['Flood.Cert'].pages": 3}

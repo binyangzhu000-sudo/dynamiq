@@ -2,9 +2,17 @@ from dynamiq.flows import Flow
 from dynamiq.nodes import InputTransformer, OutputTransformer
 from dynamiq.nodes.cloning import regenerate_node_ids
 from dynamiq.nodes.node import NodeDependency, NodeOutputReference
-from dynamiq.nodes.operators import Choice, ChoiceOption, DecisionTable, Pass, Rules, SubWorkflow
-from dynamiq.nodes.types import ChoiceCondition, ConditionOperator, DecisionRule, DerivedValue, NamedField, Rule
-from dynamiq.nodes.utils import Input
+from dynamiq.nodes.operators import Choice, ChoiceOption, DecisionTable, Expression, Pass, Rules, SubWorkflow
+from dynamiq.nodes.types import (
+    ChoiceCondition,
+    ConditionOperator,
+    DecisionRule,
+    DerivedValue,
+    ExpressionItem,
+    NamedField,
+    Rule,
+)
+from dynamiq.nodes.utils import Input, Output
 
 
 def test_a_node_reachable_twice_gets_one_new_id_and_id_paths_follow_it():
@@ -226,3 +234,80 @@ def test_a_rule_a_row_and_a_field_keep_the_ids_the_user_wrote_where_the_node_get
     assert [field.id for field in checks_copy.input_fields] == ["f-1"]
     assert [value.id for value in checks_copy.derived_values] == ["d-1"]
     assert table_copy.to_dict(for_tracing=True)["rules"][0]["id"] == "r-1"
+
+
+def test_the_bracket_path_form_follows_the_new_id_on_every_pass():
+    start = Input(id="start", name="start")
+    calc = Pass(
+        id="calc",
+        name="calc",
+        depends=[NodeDependency(node=start)],
+        input_transformer=InputTransformer(
+            selector={
+                "single": "$['start'].output.score",
+                "double": '$["start"].output.score',
+                "bare": "$[start].output.score",
+                "longer": "$['starter'].output.score",
+            }
+        ),
+    )
+    node = SubWorkflow(id="sub", name="sub", flow=Flow(id="flow", nodes=[start, calc]))
+
+    clone = regenerate_node_ids(node.clone(), {})
+
+    cloned_start, cloned_calc = clone.flow.nodes
+    renamed = f"$['{cloned_start.id}'].output.score"
+    assert cloned_calc.input_transformer.selector == {
+        "single": renamed,
+        "double": renamed,
+        "bare": renamed,
+        "longer": "$['starter'].output.score",
+    }
+    assert calc.input_transformer.selector["single"] == "$['start'].output.score"
+
+    second = regenerate_node_ids(clone.clone(), {})
+    second_start, second_calc = second.flow.nodes
+    assert second_calc.input_transformer.selector["single"] == f"$['{second_start.id}'].output.score"
+
+
+def test_a_sub_workflow_returning_every_inner_output_keeps_its_own_selector_wired():
+    inner_start = Input(id="inner_start", name="inner_start")
+    inner_calc = Expression(
+        id="inner_calc",
+        name="inner_calc",
+        depends=[NodeDependency(node=inner_start)],
+        input_fields=[NamedField(name="x")],
+        expressions=[ExpressionItem(key="doubled", expression="x * 2")],
+        input_transformer=InputTransformer(selector={"x": "$.inner_start.output.x"}),
+    )
+    # No Output node: the sub-workflow returns every inner node's output keyed by id, which its own
+    # output transformer then selects from.
+    keyed = SubWorkflow(
+        id="keyed",
+        name="keyed",
+        flow=Flow(id="keyed_flow", nodes=[inner_start, inner_calc]),
+        output_transformer=OutputTransformer(selector={"result": "$.inner_calc.doubled"}),
+    )
+    content = Pass(id="content", name="content")
+    end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(node=content)],
+        input_transformer=InputTransformer(selector={"content": "$.content.output.text"}),
+    )
+    # One Output node: the sub-workflow returns its output, whose keys are fields, not node ids.
+    single = SubWorkflow(
+        id="single",
+        name="single",
+        flow=Flow(id="single_flow", nodes=[content, end]),
+        output_transformer=OutputTransformer(selector={"answer": "$.content"}),
+    )
+
+    keyed_clone = regenerate_node_ids(keyed.clone(), {})
+    single_clone = regenerate_node_ids(single.clone(), {})
+
+    _, cloned_calc = keyed_clone.flow.nodes
+    assert keyed_clone.output_transformer.selector == {"result": f'$."{cloned_calc.id}".doubled'}
+    cloned_content, cloned_end = single_clone.flow.nodes
+    assert single_clone.output_transformer.selector == {"answer": "$.content"}
+    assert cloned_end.input_transformer.selector == {"content": f'$."{cloned_content.id}".output.text'}

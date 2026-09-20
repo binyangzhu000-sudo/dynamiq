@@ -206,9 +206,26 @@ def test_a_branch_must_name_an_option_of_a_choice():
         "expressions": [{"key": "x", "expression": "1"}],
     }
 
-    found = errors_of(flow_with(choice, on_missing_option, on_plain_node))
+    named = {
+        "id": "gate",
+        "name": "gate",
+        "type": CHOICE,
+        "depends": [{"node": "start"}],
+        "options": [{"id": "opt-hi-id", "name": "high"}],
+    }
+    # The runtime matches an option's id alone, so a branch gated on the name would never be gated.
+    on_name = {
+        "id": "c",
+        "name": "c",
+        "type": EXPRESSION,
+        "depends": [{"node": "gate", "option": "high"}],
+        "expressions": [{"key": "x", "expression": "1"}],
+    }
+
+    found = errors_of(flow_with(choice, on_missing_option, on_plain_node, named, on_name))
     assert [e for e in found if "has no such option (it has: approve)" in e]
     assert [e for e in found if "which is not a Choice node" in e]
+    assert [e for e in found if "by its name" in e and "Use 'opt-hi-id'" in e]
     assert not [e for e in found if "hit_policy" in e]
 
 

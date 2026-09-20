@@ -8,7 +8,7 @@ from dynamiq.callbacks import TracingCallbackHandler
 from dynamiq.callbacks.tracing import RunType
 from dynamiq.checkpoints.config import CheckpointConfig
 from dynamiq.flows import Flow
-from dynamiq.nodes import InputTransformer, Node, NodeGroup
+from dynamiq.nodes import InputTransformer, Node, NodeGroup, OutputTransformer
 from dynamiq.nodes.agents import Agent
 from dynamiq.nodes.llms import OpenAI
 from dynamiq.nodes.node import ErrorHandling, NodeDependency, NodeOutputReference
@@ -581,6 +581,62 @@ def test_a_map_leaves_a_dependency_condition_that_reads_the_result_alone():
     after = Workflow(flow=flow).run(input_data={"score": 10}, config=config)
     assert after.status == RunnableStatus.SUCCESS
     assert after.output["output"]["output"] == {"score": 10}
+
+
+def test_a_map_keeps_a_sub_workflow_selecting_from_every_inner_output_wired():
+    """A flow without an Output node returns every node's output by id; the node's own selector reads them."""
+    inner_start = Input(id="inner_start", name="inner_start")
+    inner_calc = Expression(
+        id="inner_calc",
+        name="inner_calc",
+        depends=[NodeDependency(node=inner_start)],
+        input_fields=[NamedField(name="x")],
+        expressions=[ExpressionItem(key="doubled", expression="x * 2")],
+        input_transformer=InputTransformer(selector={"x": "$.inner_start.output.x"}),
+    )
+    node = SubWorkflow(
+        id="keyed",
+        name="keyed",
+        flow=Flow(id="keyed_flow", nodes=[inner_start, inner_calc]),
+        output_transformer=OutputTransformer(selector={"result": "$.inner_calc.doubled"}),
+    )
+    config = RunnableConfig(callbacks=[])
+
+    assert node.run(input_data={"x": 4}, config=config).output == {"result": 8}
+
+    batch = Map(id="batch", name="batch", node=node, max_workers=2)
+    result = batch.run(input_data={"input": [{"x": 4}, {"x": 5}]}, config=config)
+
+    assert result.status == RunnableStatus.SUCCESS
+    assert result.output["output"] == [{"result": 8}, {"result": 10}]
+
+
+def test_a_map_keeps_a_flow_wired_in_the_bracket_form():
+    start = Input(id="start", name="start")
+    calc = Expression(
+        id="calc",
+        name="calc",
+        depends=[NodeDependency(node=start)],
+        input_fields=[NamedField(name="x")],
+        expressions=[ExpressionItem(key="doubled", expression="x * 2")],
+        input_transformer=InputTransformer(selector={"x": "$['start'].output.x"}),
+    )
+    end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(node=calc)],
+        input_transformer=InputTransformer(selector={"doubled": "$['calc'].output.doubled"}),
+    )
+    node = SubWorkflow(id="sw", name="sw", flow=Flow(id="bracket_flow", nodes=[start, calc, end]))
+    config = RunnableConfig(callbacks=[])
+
+    assert node.run(input_data={"x": 4}, config=config).output == {"doubled": 8}
+
+    batch = Map(id="batch", name="batch", node=node, max_workers=2)
+    result = batch.run(input_data={"input": [{"x": 4}, {"x": 5}]}, config=config)
+
+    assert result.status == RunnableStatus.SUCCESS
+    assert result.output["output"] == [{"doubled": 8}, {"doubled": 10}]
 
 
 def test_a_map_keeps_a_choice_gate_that_names_a_node_by_id():

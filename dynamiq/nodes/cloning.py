@@ -99,34 +99,55 @@ def _regenerate_ids(
 
 
 def _path_renamer(renamed: dict[str, str]) -> Callable[[Any], Any]:
-    """A function rewriting `$.<old id>` at the head of a path to the quoted new id.
+    """A function rewriting `$.<old id>` or `$['<old id>']` at the head of a path to the new id.
 
-    An id already quoted by an earlier pass, as under a Map inside a Map, is matched too. The new id is
-    quoted because a generated id may start with a digit or hold a dash, which a bare field cannot.
+    An id already quoted by an earlier pass, as under a Map inside a Map, is matched too. The dotted form
+    quotes the new id because a generated id may start with a digit, which a bare field cannot; the bracket
+    form, which shipped flows write as `$['splitter'].output`, keeps its brackets.
     """
-    pattern = re.compile(r'\$\."?(' + "|".join(re.escape(old) for old in renamed) + r')"?(?=\.|$|\s|\|)')
+    alternatives = "|".join(re.escape(old) for old in renamed)
+    pattern = re.compile(r'\$(?:\."?(' + alternatives + r')"?(?=\.|$|\s|\|)|\[(["\']?)(' + alternatives + r")\2\])")
+
+    def substitute(match: re.Match) -> str:
+        if match.group(1) is not None:
+            return f'$."{renamed[match.group(1)]}"'
+        return f"$['{renamed[match.group(3)]}']"
 
     def rename(path: Any) -> Any:
-        return pattern.sub(lambda match: f'$."{renamed[match.group(1)]}"', path) if isinstance(path, str) else path
+        return pattern.sub(substitute, path) if isinstance(path, str) else path
 
     return rename
 
 
 def _remap_transformer_paths(obj: Any, renamed: dict[str, str]) -> None:
     # Imported here: the node module is the one that imports this package's operators.
-    from dynamiq.nodes.node import OutputTransformer, Transformer
+    from dynamiq.nodes.node import Node, Transformer
 
     if not renamed:
         return
     rename = _path_renamer(renamed)
-    # An output transformer selects from the node's own output, whose keys are not node ids, so a
-    # node named like one of them must not pull its paths along.
-    for transformer in (
-        model for model in _models(obj) if isinstance(model, Transformer) and not isinstance(model, OutputTransformer)
-    ):
+    models = list(_models(obj))
+    # An output transformer selects from the node's own output, whose keys are not node ids, so a node
+    # named like one of them must not pull its paths along. A SubWorkflow whose flow lacks a single
+    # Output node is the exception: it returns every inner node's output keyed by the ids just renamed.
+    own_output = {
+        id(model.output_transformer)
+        for model in models
+        if isinstance(model, Node) and model.output_transformer is not None and not _outputs_by_node_id(model)
+    }
+    for transformer in (model for model in models if isinstance(model, Transformer) and id(model) not in own_output):
         transformer.path = rename(transformer.path)
         if transformer.selector:
             transformer.selector = {key: rename(value) for key, value in transformer.selector.items()}
+
+
+def _outputs_by_node_id(node: Any) -> bool:
+    from dynamiq.nodes.operators.sub_workflow import SubWorkflow
+    from dynamiq.nodes.utils import Output
+
+    if not isinstance(node, SubWorkflow) or node.flow is None:
+        return False
+    return sum(isinstance(inner, Output) for inner in node.flow.nodes) != 1
 
 
 def _remap_choice_conditions(obj: Any, renamed: dict[str, str]) -> None:

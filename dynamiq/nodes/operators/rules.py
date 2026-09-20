@@ -29,7 +29,9 @@ AS_OF_KEY = "as_of"
 EVALUATION_ERRORS = (UndefinedError, TypeError, ValueError, ArithmeticError, AttributeError, LookupError)
 _US_DATE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
-_INDEX = re.compile(r"^(.*)\[(-?\d+)\]$")
+_PLAIN_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# One path segment: a name, a numeric index, or a quoted key with escapes.
+_SEGMENT = re.compile(r"""\.?([^.\[\]]+)|\[(?:(-?\d+)|'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\]""")
 _EXEMPT_TESTS = frozenset({"defined", "undefined", "none", "sameas"})
 
 _MISSING = object()
@@ -115,7 +117,12 @@ def _path_of(node: nodes.Node) -> str | None:
             return None
         key = node.arg.value
         if isinstance(key, str):
-            return f"{base}.{key}"
+            # A key that is not a plain name, one with a dot in it say, keeps the subscript form, which the
+            # splitter reads back as one segment, so `docs['Flood.Cert']` is not read as `docs.Flood.Cert`.
+            if _PLAIN_KEY.match(key):
+                return f"{base}.{key}"
+            escaped = key.replace("\\", "\\\\").replace("'", "\\'")
+            return f"{base}['{escaped}']"
         if isinstance(key, int) and not isinstance(key, bool):
             return f"{base}[{key}]"
     return None
@@ -183,21 +190,28 @@ def _private_segment(paths: list[str]) -> str | None:
     document store, and the sandbox reads them from a dict as it reads any key.
     """
     for path in paths:
-        if any(segment.startswith("__") for segment in re.split(r"[.\[]", path)):
+        if any(isinstance(segment, str) and segment.startswith("__") for segment in _split_path(path)):
             return path
     return None
 
 
 def _split_path(path: str) -> list[str | int]:
     parts: list[str | int] = []
-    for piece in path.split("."):
-        indexes: list[int] = []
-        while indexed := _INDEX.match(piece):
-            piece = indexed.group(1)
-            indexes.insert(0, int(indexed.group(2)))
-        if piece:
-            parts.append(piece)
-        parts.extend(indexes)
+    position = 0
+    while position < len(path):
+        match = _SEGMENT.match(path, position)
+        if match is None:
+            # An unreadable remainder stays one segment, so a message still names the path as written.
+            parts.append(path[position:])
+            break
+        position = match.end()
+        name, index, single, double = match.groups()
+        if name is not None:
+            parts.append(name)
+        elif index is not None:
+            parts.append(int(index))
+        else:
+            parts.append(re.sub(r"\\(.)", r"\1", single if single is not None else double))
     return parts
 
 
@@ -307,7 +321,10 @@ class Rules(Node):
     def _compile_expression(self, text: str, where: str) -> Callable[..., Any]:
         try:
             reads = read_paths(text)
-            compiled = _ENVIRONMENT.compile_expression(text, undefined_to_none=True)
+            # A lookup that finds nothing must come back as RuleUndefined, whose truth test raises, rather
+            # than be turned into None on the way out: a bare `limits[program]` is then not evaluated
+            # instead of read as false and reported as a verdict.
+            compiled = _ENVIRONMENT.compile_expression(text, undefined_to_none=False)
         except TemplateSyntaxError as e:
             raise ValueError(f"{where} is not a valid expression: {e}") from e
         # The sandbox refuses these at run time; refusing them at build time names the rule instead of holding it.
@@ -387,6 +404,9 @@ class Rules(Node):
             # derived value's name would otherwise clash as a duplicate keyword argument.
             try:
                 derived[name] = expression(**{**context, **derived})
+                # A value the expression could not find is missing, and the output stays serializable.
+                if isinstance(derived[name], Undefined):
+                    derived[name] = None
             except EVALUATION_ERRORS:
                 derived[name] = None
         scope = {**context, **derived}
