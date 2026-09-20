@@ -264,6 +264,29 @@ def scope_for(reads: Reads, scope: dict[str, Any], undefined: type[Undefined]) -
     return scoped
 
 
+RESERVED_ROOT = "self"
+
+
+def reserved_read(reads: Reads) -> str | None:
+    """Returns the first path read from the one name an expression cannot read.
+
+    Jinja binds `self` to its template reference inside every compiled expression and template, so a top-level
+    key of that name is never the value handed over: `has(self)` finds the reference and passes on a record
+    without the key, and `self.id` raises about a Jinja internal. A `self` nested inside a record reads like
+    any other key.
+    """
+    return next((path for path in reads.required + reads.optional if _root(path) == RESERVED_ROOT), None)
+
+
+def refuse_reserved_read(reads: Reads, where: str) -> None:
+    """Raises when the expression reads a top-level `self`, naming the fix."""
+    if reserved := reserved_read(reads):
+        raise ValueError(
+            f"{where} reads {reserved!r}: Jinja reserves the name 'self' inside an expression, so a top-level key "
+            "of that name cannot be read; nest it inside a record or rename the input"
+        )
+
+
 def _private_segment(paths: list[str]) -> str | None:
     """The first path with a Python-internal segment (`__class__`), which the sandbox refuses on any object.
 
@@ -414,6 +437,7 @@ class Rules(Node):
         # The sandbox refuses these at run time; refusing them at build time names the rule instead of holding it.
         if private := _private_segment(reads.required + reads.optional):
             raise ValueError(f"{where} reads a private attribute ({private})")
+        refuse_reserved_read(reads, where)
         # One name cannot be both: the record's member would shadow the helper, or the helper stand in for the member.
         if clash := next((name for name in reads.helpers_read if name in reads.helpers_called), None):
             raise ValueError(f"{where} reads {clash!r} as a value and calls it as a helper")
@@ -428,6 +452,8 @@ class Rules(Node):
                 raise ValueError(f"{label} is not a valid identifier")
             if value.name in taken or value.name in HELPERS:
                 raise ValueError(f"{label} is already the name of an input or a helper")
+            if value.name == RESERVED_ROOT:
+                raise ValueError(f"{label} could not be read by a rule: Jinja reserves the name inside an expression")
             if not value.expression.strip():
                 raise ValueError(f"{label} has no expression")
             taken.add(value.name)
@@ -458,6 +484,7 @@ class Rules(Node):
                     message_reads = read_template(rule.message)
                 except TemplateSyntaxError as e:
                     raise ValueError(f"{label}: the message is not a valid template: {e}") from e
+                refuse_reserved_read(message_reads, f"{label}: the message")
             applies_compiled, applies_reads = None, Reads(required=[], optional=[])
             if applies:
                 applies_compiled, applies_reads = self._compile_expression(applies, f"{label}: applies_when")
@@ -497,7 +524,8 @@ class Rules(Node):
         for name, expression, reads in self._derived:
             # One mapping, derived winning, passed positionally: an undeclared key the upstream payload carries
             # under a derived value's name would otherwise clash as a duplicate keyword argument, and a key
-            # named `self` would collide with the compiled expression's own bound argument.
+            # named `self` would collide with the compiled expression's own bound argument. Such a key is never
+            # read: Jinja binds the name inside the expression, so a read of it is refused at build.
             try:
                 # A value the expression could not find is missing, inside a list or a dict it built as well,
                 # and the output stays serializable.

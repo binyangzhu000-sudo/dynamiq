@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -175,3 +176,27 @@ def test_a_missing_input_inside_a_list_or_a_dict_the_expression_builds_is_none_t
         "nested": [[2.5, None], {"d": [None]}],
     }
     assert json.loads(json.dumps(result.output)) == result.output
+
+
+def test_an_expression_reading_self_is_refused_at_build_while_a_nested_self_reads():
+    """Jinja binds `self` to its template reference inside every compiled expression, so an input of that name
+    is never the value handed over: `self.href` would read None and `self` an unserializable reference."""
+    for expression, where in [("self.href", "'link' reads 'self.href'"), ("self", "'link' reads 'self'")]:
+        with pytest.raises(ValueError, match=re.escape(where)):
+            Expression(
+                name="links",
+                input_fields=[NamedField(name="self")],
+                expressions=[ExpressionItem(key="link", expression=expression)],
+            )
+
+    node = Expression(
+        name="links",
+        input_fields=[NamedField(name="payload")],
+        expressions=[ExpressionItem(key="link", expression="payload.self.href")],
+    )
+
+    result = node.run(
+        input_data={"payload": {"self": {"href": "https://api/x/1"}}}, config=RunnableConfig(callbacks=[])
+    )
+
+    assert result.output == {"link": "https://api/x/1"}

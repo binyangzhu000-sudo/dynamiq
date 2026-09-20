@@ -9,6 +9,7 @@ from dynamiq.nodes.operators.rules import (
     has,
     read_paths,
     read_template,
+    reserved_read,
     resolve_path,
     scope_for,
     to_date,
@@ -129,3 +130,17 @@ def test_concrete_replaces_an_undefined_member_at_any_depth():
     assert concrete([1, undefined, (2, undefined)]) == [1, None, (2, None)]
     assert concrete({"a": undefined, "b": {"c": [undefined]}}) == {"a": None, "b": {"c": [None]}}
     assert concrete({"a": 1, "b": [2, "x"]}) == {"a": 1, "b": [2, "x"]}
+
+
+@pytest.mark.parametrize(
+    "expression, reserved",
+    [
+        ("has(self)", "self"),
+        ("self.href", "self.href"),
+        ("self['id'] > 5", "self.id"),
+        ("payload.self.href", None),
+        ("selfish > 1", None),
+    ],
+)
+def test_a_read_rooted_at_self_is_the_one_read_an_expression_cannot_make(expression, reserved):
+    assert reserved_read(read_paths(expression)) == reserved

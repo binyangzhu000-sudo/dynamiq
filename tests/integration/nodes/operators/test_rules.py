@@ -643,3 +643,33 @@ def test_a_derived_list_or_dict_keeps_none_where_the_expression_found_no_member(
     assert result["derived"] == {"discounts": [5, None], "pair": {"first": 5, "second": None}}
     assert statuses(result) == {"any": "pass"}
     assert json.loads(json.dumps(result)) == result
+
+
+def test_a_read_rooted_at_self_is_refused_at_build_while_a_nested_self_reads():
+    """Jinja binds `self` to its template reference inside every compiled expression, so a top-level key of
+    that name is never the value handed over: `has(self)` would find the reference and pass on a record
+    without the key. Refusing the read at build names the rule; a `self` inside a record is an ordinary key."""
+    for rule, where in [
+        (Rule(id="guard", name="guard", check="has(self)"), "the check reads 'self'"),
+        (Rule(id="member", name="member", check="self.id > 5"), "the check reads 'self.id'"),
+        (Rule(id="when", name="when", applies_when="self is defined", check="amount > 0"), "applies_when reads 'self'"),
+        (
+            Rule(id="message", name="message", check="amount > 0", message="{{ self.href }}"),
+            "the message reads 'self.href'",
+        ),
+    ]:
+        with pytest.raises(ValueError, match=re.escape(where)):
+            Rules(name="links", input_fields=[NamedField(name="amount")], rules=[rule])
+    with pytest.raises(ValueError, match="derived value 'link' reads 'self.href'"):
+        Rules(name="links", derived_values=[DerivedValue(name="link", expression="self.href")], rules=[])
+    with pytest.raises(ValueError, match="derived value 'self' could not be read by a rule"):
+        Rules(name="links", derived_values=[DerivedValue(name="self", expression="1")], rules=[])
+
+    node = Rules(
+        name="links",
+        input_fields=[NamedField(name="payload")],
+        rules=[Rule(id="link", name="carries its link", check="has(payload.self.href)")],
+    )
+
+    assert statuses(run_node(node, {"payload": {"self": {"href": "https://api/x/1"}}}).output) == {"link": "pass"}
+    assert statuses(run_node(node, {"payload": {"id": 1}}).output) == {"link": "fail"}

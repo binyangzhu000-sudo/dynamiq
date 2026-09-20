@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from dynamiq.nodes import Node, NodeGroup
 from dynamiq.nodes.node import ensure_config
-from dynamiq.nodes.operators.rules import HELPERS, Reads, concrete, read_paths, scope_for
+from dynamiq.nodes.operators.rules import HELPERS, Reads, concrete, read_paths, refuse_reserved_read, scope_for
 from dynamiq.nodes.types import ExpressionItem, NamedField
 from dynamiq.runnables import RunnableConfig
 
@@ -68,6 +68,7 @@ class Expression(Node):
                 raise ValueError(
                     f"Expression '{self.name}': {item.key!r} reads {clash!r} as a value and calls it as a helper"
                 )
+            refuse_reserved_read(reads, f"Expression '{self.name}': {item.key!r}")
             compiled.append((item.key, expression, reads))
         return compiled
 
@@ -78,8 +79,10 @@ class Expression(Node):
 
         context = input_data.model_dump()
         # The context goes in positionally: spread as keywords, an input named `self` would collide with the
-        # compiled expression's own bound argument and fail the run before anything is evaluated. An input named
-        # like a helper is visible where the expression reads it and hidden where the expression calls the helper.
+        # compiled expression's own bound argument and fail the run before anything is evaluated. Such an input
+        # passes through but is never read, since Jinja binds the name inside the expression and a read of it is
+        # refused at build. An input named like a helper is visible where the expression reads it and hidden
+        # where the expression calls the helper.
         # A missing input inside a list or a dict the expression builds is None there too.
         computed = {
             key: concrete(expression(scope_for(reads, context, _ENVIRONMENT.undefined)))
