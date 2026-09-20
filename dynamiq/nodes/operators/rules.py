@@ -451,7 +451,7 @@ class Rules(Node):
             raise ValueError(f"Rules: '{AS_OF_KEY}' is not a date: {value!r}") from e
 
     def _evaluate(self, compiled: CompiledRule, scope: dict[str, Any], as_of: date) -> tuple[dict[str, Any], bool]:
-        """The finding for one rule, and whether its check could run (a missing value or an error means it could not)."""
+        """The finding for one rule, and whether its check ran: a missing value or an error means it did not."""
         rule = compiled.rule
         finding: dict[str, Any] = {
             "rule_id": rule.id,
