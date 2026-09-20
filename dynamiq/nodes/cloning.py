@@ -9,7 +9,7 @@ id-keyed config field only has to be handled once.
 """
 
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -26,6 +26,11 @@ def regenerate_node_ids(obj: Any, id_map: dict[str, set[str]] | None = None) -> 
     nodes of a flow a SubWorkflow holds, are rewritten to the new ids afterwards, so the clone keeps
     reading the outputs it read before; a Choice option's condition naming a node follows it too, and
     a dependency gated on a Choice option follows the option's new id, so the gate keeps holding.
+    An id is unique only where it is read, a node id within its flow and an option id within its
+    Choice, so a path follows the ids of the flow holding the node that reads it and a gate the
+    options of the Choice it depends on: two nested flows or two Choices that spell an id alike never
+    rewrite each other's references, and the copied node's own paths, which read the flow around it
+    rather than anything the copy carries, are left as written.
     Only node ids drive the path rewrite and only option ids the gates: a column or a rule may carry
     the same text as an input key without meaning it. An output transformer and a dependency's own
     condition read a result rather than the flow, so they are left as written. A rule, a row or a
@@ -42,18 +47,14 @@ def regenerate_node_ids(obj: Any, id_map: dict[str, set[str]] | None = None) -> 
     """
     if id_map is None:
         id_map = {}
-    node_ids: dict[str, str] = {}
-    option_ids: dict[str, str] = {}
-    _regenerate_ids(obj, id_map, node_ids, option_ids, seen=set())
-    _remap_transformer_paths(obj, node_ids)
-    _remap_choice_conditions(obj, node_ids)
-    _remap_dependency_options(obj, option_ids)
+    renamed: dict[int, tuple[str, str]] = {}
+    _regenerate_ids(obj, id_map, renamed, seen=set())
+    _remap_paths(obj, renamed)
+    _remap_dependency_options(obj, renamed)
     return obj
 
 
-def _regenerate_ids(
-    obj: Any, id_map: dict[str, set[str]], node_ids: dict[str, str], option_ids: dict[str, str], seen: set[int]
-) -> Any:
+def _regenerate_ids(obj: Any, id_map: dict[str, set[str]], renamed: dict[int, tuple[str, str]], seen: set[int]) -> Any:
     # Imported here: the node and operator modules import this one.
     from dynamiq.nodes.node import Node
     from dynamiq.nodes.operators.operators import ChoiceOption
@@ -73,29 +74,30 @@ def _regenerate_ids(
             setattr(obj, "id", new_id)
             if isinstance(previous_id, str):
                 id_map.setdefault(previous_id, set()).add(new_id)
-                if isinstance(obj, Node):
-                    node_ids[previous_id] = new_id
-                elif isinstance(obj, ChoiceOption):
-                    option_ids[previous_id] = new_id
+                # Keyed by the object, not the old id: two Choices may each own an option called
+                # `default`, and two nested flows a node called `start`.
+                if isinstance(obj, (Node, ChoiceOption)):
+                    renamed[id(obj)] = (previous_id, new_id)
 
         for field_name in getattr(obj, "model_fields", {}):
             value = getattr(obj, field_name)
             if isinstance(value, list):
-                setattr(obj, field_name, [_regenerate_ids(item, id_map, node_ids, option_ids, seen) for item in value])
+                setattr(obj, field_name, [_regenerate_ids(item, id_map, renamed, seen) for item in value])
             elif isinstance(value, dict):
-                setattr(
-                    obj,
-                    field_name,
-                    {k: _regenerate_ids(v, id_map, node_ids, option_ids, seen) for k, v in value.items()},
-                )
+                setattr(obj, field_name, {k: _regenerate_ids(v, id_map, renamed, seen) for k, v in value.items()})
             else:
-                setattr(obj, field_name, _regenerate_ids(value, id_map, node_ids, option_ids, seen))
+                setattr(obj, field_name, _regenerate_ids(value, id_map, renamed, seen))
         return obj
     if isinstance(obj, list):
-        return [_regenerate_ids(item, id_map, node_ids, option_ids, seen) for item in obj]
+        return [_regenerate_ids(item, id_map, renamed, seen) for item in obj]
     if isinstance(obj, dict):
-        return {k: _regenerate_ids(v, id_map, node_ids, option_ids, seen) for k, v in obj.items()}
+        return {k: _regenerate_ids(v, id_map, renamed, seen) for k, v in obj.items()}
     return obj
+
+
+def _renames(models: Iterable[Any], renamed: dict[int, tuple[str, str]]) -> dict[str, str]:
+    """The old-to-new ids of the given models, for those the walk renamed."""
+    return dict(pair for model in models if (pair := renamed.get(id(model))) is not None)
 
 
 def _path_renamer(renamed: dict[str, str]) -> Callable[[Any], Any]:
@@ -126,26 +128,42 @@ def _path_renamer(renamed: dict[str, str]) -> Callable[[Any], Any]:
     return rename
 
 
-def _remap_transformer_paths(obj: Any, renamed: dict[str, str]) -> None:
-    # Imported here: the node module is the one that imports this package's operators.
-    from dynamiq.nodes.node import Node, Transformer
+def _remap_paths(obj: Any, renamed: dict[int, tuple[str, str]]) -> None:
+    # Imported here: the flow, node and operator modules import this one.
+    from dynamiq.flows.base import BaseFlow
+    from dynamiq.nodes.node import Node
+    from dynamiq.nodes.operators.operators import Choice
 
-    if not renamed:
-        return
-    rename = _path_renamer(renamed)
     models = list(_models(obj))
+    # A node's input holds the results of its flow keyed by node id, and a Choice option's condition reads
+    # that input, so both follow the ids of the flow holding the node. A node held by no flow in the copy,
+    # the copied node itself above all, reads a flow the copy does not carry. A dependency's condition
+    # reads the dependency's result (status, input, output, error) rather than the flow, so a node named
+    # `output` or `status` must leave it alone.
+    for flow in (model for model in models if isinstance(model, BaseFlow)):
+        nodes = getattr(flow, "nodes", None) or []
+        if not (scope := _renames(nodes, renamed)):
+            continue
+        rename = _path_renamer(scope)
+        for node in nodes:
+            _rename_transformer(node.input_transformer, rename)
+            if isinstance(node, Choice):
+                for option in node.options or []:
+                    _rename_condition(option.condition, rename)
     # An output transformer selects from the node's own output, whose keys are not node ids, so a node
     # named like one of them must not pull its paths along. A SubWorkflow whose flow lacks a single
     # Output node is the exception: it returns every inner node's output keyed by the ids just renamed.
-    own_output = {
-        id(model.output_transformer)
-        for model in models
-        if isinstance(model, Node) and model.output_transformer is not None and not _outputs_by_node_id(model)
-    }
-    for transformer in (model for model in models if isinstance(model, Transformer) and id(model) not in own_output):
-        transformer.path = rename(transformer.path)
-        if transformer.selector:
-            transformer.selector = {key: rename(value) for key, value in transformer.selector.items()}
+    for node in (model for model in models if isinstance(model, Node) and _outputs_by_node_id(model)):
+        if scope := _renames(node.flow.nodes, renamed):
+            _rename_transformer(node.output_transformer, _path_renamer(scope))
+
+
+def _rename_transformer(transformer: Any, rename: Callable[[Any], Any]) -> None:
+    if transformer is None:
+        return
+    transformer.path = rename(transformer.path)
+    if transformer.selector:
+        transformer.selector = {key: rename(value) for key, value in transformer.selector.items()}
 
 
 def _outputs_by_node_id(node: Any) -> bool:
@@ -157,20 +175,6 @@ def _outputs_by_node_id(node: Any) -> bool:
     return sum(isinstance(inner, Output) for inner in node.flow.nodes) != 1
 
 
-def _remap_choice_conditions(obj: Any, renamed: dict[str, str]) -> None:
-    from dynamiq.nodes.operators.operators import ChoiceOption
-
-    if not renamed:
-        return
-    # An option's condition reads the same node-id-keyed input a transformer selector does, so a gate
-    # that names a node by id would otherwise resolve against an id no node in the copy carries. A
-    # dependency's condition reads the dependency's result (status, input, output, error) instead, so
-    # a node named `output` or `status` must leave it alone.
-    rename = _path_renamer(renamed)
-    for option in (model for model in _models(obj) if isinstance(model, ChoiceOption)):
-        _rename_condition(option.condition, rename)
-
-
 def _rename_condition(condition: Any, rename: Callable[[Any], Any]) -> None:
     if condition is None:
         return
@@ -179,13 +183,17 @@ def _rename_condition(condition: Any, rename: Callable[[Any], Any]) -> None:
         _rename_condition(operand, rename)
 
 
-def _remap_dependency_options(obj: Any, renamed: dict[str, str]) -> None:
+def _remap_dependency_options(obj: Any, renamed: dict[int, tuple[str, str]]) -> None:
     from dynamiq.nodes.node import NodeDependency
 
-    # A gate is matched by string against the Choice's option ids, which were just renamed.
+    # A gate is matched by string against the option ids of the Choice it depends on, which were just
+    # renamed; another Choice's option of the same name is not the one it names.
     for dependency in (model for model in _models(obj) if isinstance(model, NodeDependency)):
-        if dependency.option in renamed:
-            dependency.option = renamed[dependency.option]
+        if dependency.option is None:
+            continue
+        options = _renames(getattr(dependency.node, "options", None) or [], renamed)
+        if dependency.option in options:
+            dependency.option = options[dependency.option]
 
 
 def _models(obj: Any, seen: set[int] | None = None) -> Iterator[BaseModel]:

@@ -338,6 +338,97 @@ def test_a_map_keeps_the_choice_gates_inside_the_flow():
     assert result.output["output"] == [{"hi": None, "lo": "LOW"}, {"hi": "HIGH", "lo": None}]
 
 
+def test_a_map_keeps_the_gates_of_two_choices_sharing_an_option_id():
+    """Two Choices in one flow each own an option called `go`; a gate follows the option of its own Choice."""
+    start = Input(id="start", name="start")
+
+    def route(node_id: str, key: str) -> Choice:
+        return Choice(
+            id=node_id,
+            name=node_id,
+            options=[
+                ChoiceOption(
+                    id="go",
+                    condition=ChoiceCondition(
+                        operator=ConditionOperator.NUMERIC_GREATER_THAN, variable=f"$.start.output.{key}", value=0
+                    ),
+                ),
+                ChoiceOption(id="default"),
+            ],
+            depends=[NodeDependency(node=start)],
+        )
+
+    route_a, route_b = route("route_a", "a"), route("route_b", "b")
+    a_go = Expression(
+        id="a_go",
+        name="a_go",
+        expressions=[ExpressionItem(key="band", expression="'A'")],
+        depends=[NodeDependency(node=route_a, option="go")],
+    )
+    b_go = Expression(
+        id="b_go",
+        name="b_go",
+        expressions=[ExpressionItem(key="band", expression="'B'")],
+        depends=[NodeDependency(node=route_b, option="go")],
+    )
+    end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(node=a_go), NodeDependency(node=b_go)],
+        input_transformer=InputTransformer(selector={"a": "$.a_go.output.band", "b": "$.b_go.output.band"}),
+    )
+    review = SubWorkflow(
+        id="review", name="review", flow=Flow(id="review-flow", nodes=[start, route_a, route_b, a_go, b_go, end])
+    )
+    batch = Map(id="batch", name="batch", node=review, max_workers=2)
+
+    result = batch.run(input_data={"input": [{"a": 1, "b": 0}, {"a": 0, "b": 1}]}, config=RunnableConfig(callbacks=[]))
+
+    # A gate moved to the other Choice's option finds no result under it and would let the branch run.
+    assert result.status == RunnableStatus.SUCCESS
+    assert result.output["output"] == [{"a": "A", "b": None}, {"a": None, "b": "B"}]
+
+
+def test_a_map_keeps_nested_flows_that_spell_a_node_id_alike_wired():
+    """The outer and the inner flow both hold a `start`; every reader follows its own flow's copy."""
+    inner_start = Input(id="start", name="start")
+    double = Expression(
+        id="double",
+        name="double",
+        input_fields=[NamedField(name="x")],
+        expressions=[ExpressionItem(key="doubled", expression="x * 2")],
+        depends=[NodeDependency(node=inner_start)],
+        input_transformer=InputTransformer(selector={"x": "$.start.output.x"}),
+    )
+    inner_end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(node=double)],
+        input_transformer=InputTransformer(selector={"doubled": "$.double.output.doubled"}),
+    )
+    outer_start = Input(id="start", name="start")
+    inner = SubWorkflow(
+        id="inner",
+        name="inner",
+        flow=Flow(id="inner-flow", nodes=[inner_start, double, inner_end]),
+        depends=[NodeDependency(node=outer_start)],
+        input_transformer=InputTransformer(selector={"x": "$.start.output.x"}),
+    )
+    outer_end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(node=inner)],
+        input_transformer=InputTransformer(selector={"x": "$.start.output.x", "doubled": "$.inner.output.doubled"}),
+    )
+    outer = SubWorkflow(id="outer", name="outer", flow=Flow(id="outer-flow", nodes=[outer_start, inner, outer_end]))
+    batch = Map(id="batch", name="batch", node=outer, max_workers=2)
+
+    result = batch.run(input_data={"input": [{"x": 2}, {"x": 5}]}, config=RunnableConfig(callbacks=[]))
+
+    assert result.status == RunnableStatus.SUCCESS
+    assert result.output["output"] == [{"x": 2, "doubled": 4}, {"x": 5, "doubled": 10}]
+
+
 def test_a_map_leaves_a_selector_that_names_an_input_key_alone():
     start = Input(id="start", name="start")
     table = DecisionTable(

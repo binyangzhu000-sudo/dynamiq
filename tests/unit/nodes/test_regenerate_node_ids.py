@@ -76,6 +76,90 @@ def test_a_dependency_gated_on_a_choice_option_follows_the_option_id():
     assert hi.depends[0].option == "opt-hi"
 
 
+def test_two_choices_sharing_an_option_id_keep_their_own_gates():
+    start = Input(id="start", name="start")
+
+    def route(node_id: str, key: str) -> Choice:
+        return Choice(
+            id=node_id,
+            name=node_id,
+            options=[
+                ChoiceOption(
+                    id="go",
+                    condition=ChoiceCondition(
+                        operator=ConditionOperator.NUMERIC_GREATER_THAN, variable=f"$.start.output.{key}", value=0
+                    ),
+                ),
+                ChoiceOption(id="default"),
+            ],
+            depends=[NodeDependency(node=start)],
+        )
+
+    route_a, route_b = route("route_a", "a"), route("route_b", "b")
+    a_go = Pass(id="a_go", name="a_go", depends=[NodeDependency(node=route_a, option="go")])
+    b_default = Pass(id="b_default", name="b_default", depends=[NodeDependency(node=route_b, option="default")])
+    node = SubWorkflow(id="sub", name="sub", flow=Flow(id="flow", nodes=[start, route_a, route_b, a_go, b_default]))
+
+    clone = regenerate_node_ids(node.clone(), {})
+
+    # A gate follows the option of the Choice it depends on, not the last option of that name the walk met.
+    _, cloned_a, cloned_b, cloned_a_go, cloned_b_default = clone.flow.nodes
+    assert cloned_a.options[0].id != cloned_b.options[0].id
+    assert cloned_a_go.depends[0].option == cloned_a.options[0].id
+    assert cloned_b_default.depends[0].option == cloned_b.options[1].id
+    assert a_go.depends[0].option == "go" and b_default.depends[0].option == "default"
+
+
+def test_nested_flows_spelling_a_node_id_alike_keep_their_own_paths():
+    inner_start = Input(id="start", name="start")
+    inner_calc = Pass(
+        id="calc",
+        name="calc",
+        depends=[NodeDependency(node=inner_start)],
+        input_transformer=InputTransformer(selector={"x": "$.start.output.x"}),
+    )
+    inner_end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(node=inner_calc)],
+        input_transformer=InputTransformer(selector={"x": "$.calc.output.x"}),
+    )
+    outer_start = Input(id="start", name="start")
+    inner = SubWorkflow(
+        id="inner",
+        name="inner",
+        flow=Flow(id="inner-flow", nodes=[inner_start, inner_calc, inner_end]),
+        depends=[NodeDependency(node=outer_start)],
+        input_transformer=InputTransformer(selector={"x": "$.start.output.x"}),
+    )
+    outer_end = Output(
+        id="end",
+        name="end",
+        depends=[NodeDependency(node=inner)],
+        input_transformer=InputTransformer(selector={"x": "$.start.output.x", "inner": "$.inner.output.x"}),
+    )
+    # The copied node's own selector reads the flow around it, which the copy does not carry.
+    node = SubWorkflow(
+        id="outer",
+        name="outer",
+        flow=Flow(id="outer-flow", nodes=[outer_start, inner, outer_end]),
+        input_transformer=InputTransformer(selector={"x": "$.start.output.x"}),
+    )
+
+    clone = regenerate_node_ids(node.clone(), {})
+
+    cloned_outer_start, cloned_inner, cloned_outer_end = clone.flow.nodes
+    cloned_inner_start, cloned_inner_calc, _ = cloned_inner.flow.nodes
+    assert cloned_inner_start.id != cloned_outer_start.id
+    assert cloned_inner_calc.input_transformer.selector == {"x": f'$."{cloned_inner_start.id}".output.x'}
+    assert cloned_inner.input_transformer.selector == {"x": f'$."{cloned_outer_start.id}".output.x'}
+    assert cloned_outer_end.input_transformer.selector == {
+        "x": f'$."{cloned_outer_start.id}".output.x',
+        "inner": f'$."{cloned_inner.id}".output.x',
+    }
+    assert clone.input_transformer.selector == {"x": "$.start.output.x"}
+
+
 def test_a_choice_condition_naming_a_node_by_id_follows_the_new_id():
     start = Input(id="start", name="start")
     route = Choice(
