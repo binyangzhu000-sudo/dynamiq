@@ -103,15 +103,22 @@ def _path_renamer(renamed: dict[str, str]) -> Callable[[Any], Any]:
 
     An id already quoted by an earlier pass, as under a Map inside a Map, is matched too. The dotted form
     quotes the new id because a generated id may start with a digit, which a bare field cannot; the bracket
-    form, which shipped flows write as `$['splitter'].output`, keeps its brackets.
+    form, which shipped flows write as `$['splitter'].output`, keeps its brackets. In the dotted form the id
+    ends where a character that cannot be part of an id follows, so `start` never matches `start-2` while
+    `{{$.start}}` and `$.start['output']` are matched; the quotes come in pairs, so a path inside a quoted
+    string keeps its closing quote.
     """
     alternatives = "|".join(re.escape(old) for old in renamed)
-    pattern = re.compile(r'\$(?:\."?(' + alternatives + r')"?(?=\.|$|\s|\|)|\[(["\']?)(' + alternatives + r")\2\])")
+    pattern = re.compile(
+        r'\$(?:\.(?:"(' + alternatives + r')"|(' + alternatives + r"))(?![A-Za-z0-9_-])"
+        r"|\[([\"']?)(" + alternatives + r")\3\])"
+    )
 
     def substitute(match: re.Match) -> str:
-        if match.group(1) is not None:
-            return f'$."{renamed[match.group(1)]}"'
-        return f"$['{renamed[match.group(3)]}']"
+        dotted = match.group(1) or match.group(2)
+        if dotted is not None:
+            return f'$."{renamed[dotted]}"'
+        return f"$['{renamed[match.group(4)]}']"
 
     def rename(path: Any) -> Any:
         return pattern.sub(substitute, path) if isinstance(path, str) else path

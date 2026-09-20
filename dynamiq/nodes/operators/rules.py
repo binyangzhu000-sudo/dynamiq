@@ -279,10 +279,11 @@ class Rules(Node):
     finding also carries under `evaluated`. Rules compile when the node is built, so a malformed expression
     fails then, naming the rule.
 
-    The output holds `findings` in rule order, a `summary` of statuses, `status` (`fail` if any rule failed,
-    else `warn` if any warned, else `not_evaluated` if any rule could not be evaluated, else `pass`) and the
-    `derived` values. An optional `as_of` input, an ISO date,
-    fixes the date the effective windows are compared with; without it the run date is used.
+    The output holds `findings` in rule order, a `summary` of statuses, `status` and the `derived` values.
+    The status is `fail` if any rule failed, else `warn` if any warned, else `not_evaluated` if any check
+    did not run, else `pass`; a check that read a missing value did not run under either policy, so a record
+    is never `pass` while a value was missing, whatever its finding reports. An optional `as_of` input, an
+    ISO date, fixes the date the effective windows are compared with; without it the run date is used.
     """
 
     name: str | None = "rules"

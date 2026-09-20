@@ -270,6 +270,39 @@ def test_the_bracket_path_form_follows_the_new_id_on_every_pass():
     assert second_calc.input_transformer.selector["single"] == f"$['{second_start.id}'].output.score"
 
 
+def test_a_dotted_path_follows_the_new_id_wherever_the_id_ends():
+    start = Input(id="start", name="start")
+    calc = Pass(
+        id="calc",
+        name="calc",
+        depends=[NodeDependency(node=start)],
+        input_transformer=InputTransformer(
+            selector={
+                "braces": "{{$.start.output.score}}",
+                "bare_braces": "{{$.start}}",
+                "bracket_after": "$.start['output'].score",
+                "quoted": '"$.start"',
+                "underscore": "$.start_2.output.score",
+                "dash": "$.start-2.output.score",
+            }
+        ),
+    )
+    node = SubWorkflow(id="sub", name="sub", flow=Flow(id="flow", nodes=[start, calc]))
+
+    clone = regenerate_node_ids(node.clone(), {})
+
+    cloned_start, cloned_calc = clone.flow.nodes
+    new = f'$."{cloned_start.id}"'
+    assert cloned_calc.input_transformer.selector == {
+        "braces": "{{" + new + ".output.score}}",
+        "bare_braces": "{{" + new + "}}",
+        "bracket_after": new + "['output'].score",
+        "quoted": '"' + new + '"',
+        "underscore": "$.start_2.output.score",
+        "dash": "$.start-2.output.score",
+    }
+
+
 def test_a_sub_workflow_returning_every_inner_output_keeps_its_own_selector_wired():
     inner_start = Input(id="inner_start", name="inner_start")
     inner_calc = Expression(
