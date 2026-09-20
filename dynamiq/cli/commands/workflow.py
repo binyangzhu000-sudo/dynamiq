@@ -601,8 +601,8 @@ def save_workflow(
 @click.option(
     "--dry-run/--no-dry-run",
     default=True,
-    help="Sent as dry_run. On by default: without it the endpoint answers 400 bad_input. "
-    "It does NOT stop nodes executing - tools really act.",
+    help="Sent as dry_run, on by default as on the endpoint. The nodes still run, tools included; a dry run "
+    "deletes afterwards what the run wrote into a vector store, and --no-dry-run keeps it.",
 )
 @click.option("--last-node-output", is_flag=True, help="Return only the last node's output.")
 @with_api_and_settings
@@ -614,18 +614,18 @@ def test_workflow(
     This endpoint takes a FORM (not a JSON body): `flow` and `input` are sent as
     JSON-encoded strings. FLOW/INPUT_DATA are inline JSON or @file. No project_id needed.
 
-    `dry_run` is on by default because it is the only form the endpoint accepts - without it
-    the answer is `400 bad_input` with an empty details object. Despite the name it is NOT a
-    simulation: the flow executes and its tools really act, so a Notion tool creates a real
-    page. Choose an obviously-test input.
+    `dry_run` is on by default, as it is on the endpoint. It is not a simulation: the flow
+    executes and its tools really act, so a Notion tool creates a real page. What it governs is
+    cleanup: the documents a writer ingested into a vector store, and a collection it created,
+    are deleted once the run ends. --no-dry-run sends dry_run=false and keeps them; a field left
+    out would not, since the runtime's own default is on. Choose an obviously-test input.
     """
     form = {
         "flow": json.dumps(normalize_flow(read_json_arg(flow), settings.project_id)),
         "input": json.dumps(read_json_arg(input_data)),
         "stream": "false",
+        "dry_run": "true" if dry_run else "false",
     }
-    if dry_run:
-        form["dry_run"] = "true"
     if last_node_output:
         form["last_node_output"] = "true"
     # This endpoint takes multipart; a urlencoded body is answered with 415.
