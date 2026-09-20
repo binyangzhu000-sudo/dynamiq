@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from dynamiq.nodes import Node, NodeGroup
 from dynamiq.nodes.node import ensure_config
-from dynamiq.nodes.operators.rules import HELPERS
+from dynamiq.nodes.operators.rules import HELPERS, Reads, read_paths, scope_for
 from dynamiq.nodes.types import ExpressionItem, NamedField
 from dynamiq.runnables import RunnableConfig
 
@@ -32,8 +32,9 @@ class Expression(Node):
     referred to on its own that is missing evaluates to None; using a missing input in arithmetic
     fails the run, as does an expression that reaches for Python internals. The helpers a rule can
     call are available as well: `has`, `days_between`, `date`, `today`, `len`, `abs`, `min`, `max`,
-    `sum` and `round`. The output holds one key per expression, plus every input when `pass_through`
-    is set, with expressions winning on a clash.
+    `sum` and `round`; an input named like one of them is the input where an expression reads it as a
+    value and the helper where an expression calls it. The output holds one key per expression, plus every
+    input when `pass_through` is set, with expressions winning on a clash.
     """
 
     name: str | None = "expression"
@@ -43,13 +44,13 @@ class Expression(Node):
     pass_through: bool = False
     input_schema: ClassVar[type[ExpressionInputSchema]] = ExpressionInputSchema
 
-    _compiled: list[tuple[str, Callable[..., Any]]] = PrivateAttr(default_factory=list)
+    _compiled: list[tuple[str, Callable[..., Any], Reads]] = PrivateAttr(default_factory=list)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._compiled = self._compile()
 
-    def _compile(self) -> list[tuple[str, Callable[..., Any]]]:
+    def _compile(self) -> list[tuple[str, Callable[..., Any], Reads]]:
         compiled = []
         keys: set[str] = set()
         for item in self.expressions:
@@ -59,9 +60,15 @@ class Expression(Node):
                 raise ValueError(f"Expression '{self.name}': key {item.key!r} is used twice")
             keys.add(item.key)
             try:
-                compiled.append((item.key, _ENVIRONMENT.compile_expression(item.expression, undefined_to_none=True)))
+                reads = read_paths(item.expression)
+                expression = _ENVIRONMENT.compile_expression(item.expression, undefined_to_none=True)
             except TemplateSyntaxError as e:
                 raise ValueError(f"Expression '{self.name}': {item.key!r} is not a valid expression: {e}") from e
+            if clash := next((name for name in reads.helpers_read if name in reads.helpers_called), None):
+                raise ValueError(
+                    f"Expression '{self.name}': {item.key!r} reads {clash!r} as a value and calls it as a helper"
+                )
+            compiled.append((item.key, expression, reads))
         return compiled
 
     def execute(self, input_data: ExpressionInputSchema, config: RunnableConfig = None, **kwargs) -> dict[str, Any]:
@@ -71,6 +78,10 @@ class Expression(Node):
 
         context = input_data.model_dump()
         # The context goes in positionally: spread as keywords, an input named `self` would collide with the
-        # compiled expression's own bound argument and fail the run before anything is evaluated.
-        computed = {key: expression(context) for key, expression in self._compiled}
+        # compiled expression's own bound argument and fail the run before anything is evaluated. An input named
+        # like a helper is visible where the expression reads it and hidden where the expression calls the helper.
+        computed = {
+            key: expression(scope_for(reads, context, _ENVIRONMENT.undefined))
+            for key, expression, reads in self._compiled
+        }
         return {**context, **computed} if self.pass_through else computed

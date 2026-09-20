@@ -128,3 +128,23 @@ def test_an_input_named_self_does_not_stop_the_evaluation():
 
     assert result.status == RunnableStatus.SUCCESS
     assert result.output == {"self": "https://api/x/1", "amount": 3, "doubled": 6}
+
+
+def test_an_input_named_like_a_helper_is_the_input_where_it_is_read_and_the_helper_where_it_is_called():
+    node = Expression(
+        name="dates",
+        input_fields=[NamedField(name="date"), NamedField(name="opened")],
+        expressions=[
+            ExpressionItem(key="dated", expression="date"),
+            ExpressionItem(key="opened_year", expression="date(opened).year"),
+        ],
+    )
+
+    result = node.run(input_data={"date": "2026-09-01", "opened": "2026-08-20"}, config=RunnableConfig(callbacks=[]))
+    absent = node.run(input_data={"opened": "2026-08-20"}, config=RunnableConfig(callbacks=[]))
+
+    assert result.output == {"dated": "2026-09-01", "opened_year": 2026}
+    # A missing input named like a helper is missing, not the helper.
+    assert absent.output == {"dated": None, "opened_year": 2026}
+    with pytest.raises(ValueError, match="'clash' reads 'date' as a value and calls it as a helper"):
+        Expression(expressions=[ExpressionItem(key="clash", expression="date(date)")])

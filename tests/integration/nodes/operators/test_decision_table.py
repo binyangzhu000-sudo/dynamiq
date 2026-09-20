@@ -133,6 +133,22 @@ def test_malformed_rules_fail_when_the_node_is_built(rules, message):
         adjustments_table(rules=rules)
 
 
+def test_a_column_name_declared_twice_is_refused():
+    """The output is keyed by column name, so a second `rate` would silently replace the first."""
+    with pytest.raises(ValueError, match="output column 'rate' is declared twice"):
+        DecisionTable(
+            input_columns=[NamedField(name="fico", type="int")],
+            output_columns=[NamedField(name="rate", type="float"), NamedField(name="rate", type="float")],
+            rules=[DecisionRule(name="r1", when=["> 600"], then=["6.5", "9.9"])],
+        )
+    with pytest.raises(ValueError, match="input column 'fico' is declared twice"):
+        DecisionTable(
+            input_columns=[NamedField(name="fico", type="int"), NamedField(name="fico", type="int")],
+            output_columns=[NamedField(name="decision", type="string")],
+            rules=[DecisionRule(name="r1", when=["> 600", ""], then=["approve"])],
+        )
+
+
 def test_reserved_output_name_is_refused():
     with pytest.raises(ValueError, match="'matched_rules' is reserved"):
         adjustments_table(output_columns=[NamedField(name="matched_rules")], rules=[])

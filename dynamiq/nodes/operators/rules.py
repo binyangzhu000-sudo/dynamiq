@@ -128,46 +128,85 @@ def _path_of(node: nodes.Node) -> str | None:
     return None
 
 
+# The names the sandbox provides on its own: the helpers and Jinja's own globals (`range`, `dict`, ...).
+GLOBAL_NAMES = frozenset(_ENVIRONMENT.globals)
+
+
 class Reads(NamedTuple):
-    """The paths an expression reads: the ones it needs, and the ones it only asks about."""
+    """The paths an expression reads: the ones it needs, the ones it only asks about, and the global names it
+    calls and reads as values, which a record key of the same name would shadow."""
 
     required: list[str]
     optional: list[str]
+    helpers_called: tuple[str, ...] = ()
+    helpers_read: tuple[str, ...] = ()
 
 
-def _collect_paths(node: nodes.Node, reads: Reads, required: bool) -> None:
-    # A value asked about with `has`, `is defined` or `default` is allowed to be missing.
-    if isinstance(node, nodes.Call) and isinstance(node.node, nodes.Name) and node.node.name == "has":
-        for argument in node.args:
-            _collect_paths(argument, reads, required=False)
+class _Collected(NamedTuple):
+    required: list[str]
+    optional: list[str]
+    called: list[str]
+
+
+def _root(path: str) -> str:
+    return path.split(".")[0].split("[")[0]
+
+
+def _collect_paths(node: nodes.Node, collected: _Collected, required: bool) -> None:
+    # A call of a helper reads its arguments, never a member of the helper's name; a value asked about with
+    # `has`, `is defined` or `default` is allowed to be missing.
+    if isinstance(node, nodes.Call) and isinstance(node.node, nodes.Name) and node.node.name in GLOBAL_NAMES:
+        collected.called.append(node.node.name)
+        for child in node.iter_child_nodes(exclude=("node",)):
+            _collect_paths(child, collected, required and node.node.name != "has")
         return
     if isinstance(node, nodes.Test) and node.name in _EXEMPT_TESTS:
-        _collect_paths(node.node, reads, required=False)
+        _collect_paths(node.node, collected, required=False)
         return
     if isinstance(node, nodes.Filter) and node.name == "default":
-        _collect_paths(node.node, reads, required=False)
+        _collect_paths(node.node, collected, required=False)
         for argument in node.args:
-            _collect_paths(argument, reads, required)
+            _collect_paths(argument, collected, required)
         return
     # A method call reads the object it is called on, not a member of the method's name: `invoice.get('vat_rate')`
     # needs `invoice`, and a dict holds no key called `get`.
     if isinstance(node, nodes.Call) and isinstance(node.node, nodes.Getattr):
-        _collect_paths(node.node.node, reads, required)
+        _collect_paths(node.node.node, collected, required)
         for child in node.iter_child_nodes(exclude=("node",)):
-            _collect_paths(child, reads, required)
+            _collect_paths(child, collected, required)
         return
     path = _path_of(node)
     if path is not None:
-        target = reads.required if required else reads.optional
-        if path.split(".")[0].split("[")[0] not in _ENVIRONMENT.globals and path not in target:
+        target = collected.required if required else collected.optional
+        if path not in target:
             target.append(path)
         return
     for child in node.iter_child_nodes():
-        _collect_paths(child, reads, required)
+        _collect_paths(child, collected, required)
 
 
 def _is_under(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix + ".") or path.startswith(prefix + "[")
+
+
+def _reads_of(parsed: nodes.Template) -> Reads:
+    collected = _Collected(required=[], optional=[], called=[])
+    _collect_paths(parsed, collected, required=True)
+    required: list[str] = []
+    optional = list(collected.optional)
+    for path in collected.required:
+        if any(_is_under(path, guarded) for guarded in collected.optional):
+            if path not in optional:
+                optional.append(path)
+        else:
+            required.append(path)
+    roots = dict.fromkeys(_root(path) for path in required + optional)
+    return Reads(
+        required=required,
+        optional=optional,
+        helpers_called=tuple(dict.fromkeys(collected.called)),
+        helpers_read=tuple(root for root in roots if root in GLOBAL_NAMES),
+    )
 
 
 def read_paths(expression: str) -> Reads:
@@ -176,18 +215,33 @@ def read_paths(expression: str) -> Reads:
     A path the expression only asks `has`, `is defined` or `default` about is optional: it may be missing
     without stopping the evaluation, and so may anything read under it, since `has(docs.FloodCert) and
     docs.FloodCert.zone == 'A'` is how a check guards a read; the guard decides, not a pre-check. Every other
-    path is required.
+    path is required. A helper's name is never a read: `days_between(a, b)` reads `a` and `b`, while a bare
+    `date` is a member of the record, whatever the record holds under it.
     """
-    collected = Reads(required=[], optional=[])
-    _collect_paths(_ENVIRONMENT.parse("{{ " + expression + " }}"), collected, required=True)
-    reads = Reads(required=[], optional=list(collected.optional))
-    for path in collected.required:
-        if any(_is_under(path, optional) for optional in collected.optional):
-            if path not in reads.optional:
-                reads.optional.append(path)
-        else:
-            reads.required.append(path)
-    return reads
+    return _reads_of(_ENVIRONMENT.parse("{{ " + expression + " }}"))
+
+
+def read_template(template: str) -> Reads:
+    """The paths a message template reads, the way `read_paths` reads an expression."""
+    return _reads_of(_ENVIRONMENT.parse(template))
+
+
+def scope_for(reads: Reads, scope: dict[str, Any], undefined: type[Undefined]) -> dict[str, Any]:
+    """The scope one expression evaluates in.
+
+    A record key named like a helper (`date`, say) is an ordinary member where the expression reads it as a
+    value and stays out of the way where the expression calls the helper, so a record that carries `date` and a
+    sibling rule that calls `date(...)` both work. A member the expression reads but the record lacks is undefined
+    rather than the helper, so `has(date)` never passes on the helper's presence.
+    """
+    shadowed = [name for name in reads.helpers_called if name in scope]
+    absent = [name for name in reads.helpers_read if name not in scope]
+    if not shadowed and not absent:
+        return scope
+    scoped = {name: value for name, value in scope.items() if name not in shadowed}
+    for name in absent:
+        scoped[name] = undefined(name=name)
+    return scoped
 
 
 def _private_segment(paths: list[str]) -> str | None:
@@ -262,6 +316,7 @@ class CompiledRule(NamedTuple):
     check: Callable[..., Any]
     check_reads: Reads
     message: Template | None
+    message_reads: Reads
     effective_from: date | None
     effective_until: date | None
 
@@ -276,7 +331,8 @@ class Rules(Node):
     Inputs arrive by name and rules read them by path (`docs.Note.interest_rate`), so a record of any shape
     needs no mapping beyond naming it. Derived values are computed once per record, in order, before the rules
     run, and are read by name like an input. Expressions use the same sandboxed engine as the Expression node,
-    plus `has`, `days_between`, `date`, `today`, `len`, `abs`, `min`, `max`, `sum` and `round`.
+    plus `has`, `days_between`, `date`, `today`, `len`, `abs`, `min`, `max`, `sum` and `round`. A record member
+    named like a helper is the member where a rule reads it as a value and the helper where a rule calls it.
 
     Every enabled rule reports a status: `pass` when its check holds; its severity (`fail`, `warn`, `info`)
     when the check does not; `not_applicable` when `applies_when` does not hold or the record's `as_of` date
@@ -302,7 +358,7 @@ class Rules(Node):
     input_schema: ClassVar[type[RulesInputSchema]] = RulesInputSchema
 
     _compiled: list[CompiledRule] = PrivateAttr(default_factory=list)
-    _derived: list[tuple[str, Callable[..., Any]]] = PrivateAttr(default_factory=list)
+    _derived: list[tuple[str, Callable[..., Any], Reads]] = PrivateAttr(default_factory=list)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -326,7 +382,7 @@ class Rules(Node):
             data["rules_count"] = len(self.rules)
         return data
 
-    def _compile_expression(self, text: str, where: str) -> Callable[..., Any]:
+    def _compile_expression(self, text: str, where: str) -> tuple[Callable[..., Any], Reads]:
         try:
             reads = read_paths(text)
             # A lookup that finds nothing must come back as RuleUndefined, whose truth test raises, rather
@@ -338,9 +394,12 @@ class Rules(Node):
         # The sandbox refuses these at run time; refusing them at build time names the rule instead of holding it.
         if private := _private_segment(reads.required + reads.optional):
             raise ValueError(f"{where} reads a private attribute ({private})")
-        return compiled
+        # One name cannot be both: the record's member would shadow the helper, or the helper stand in for the member.
+        if clash := next((name for name in reads.helpers_read if name in reads.helpers_called), None):
+            raise ValueError(f"{where} reads {clash!r} as a value and calls it as a helper")
+        return compiled, reads
 
-    def _compile_derived(self) -> list[tuple[str, Callable[..., Any]]]:
+    def _compile_derived(self) -> list[tuple[str, Callable[..., Any], Reads]]:
         taken = {field.name for field in self.input_fields}
         compiled = []
         for value in self.derived_values:
@@ -352,7 +411,7 @@ class Rules(Node):
             if not value.expression.strip():
                 raise ValueError(f"{label} has no expression")
             taken.add(value.name)
-            compiled.append((value.name, self._compile_expression(value.expression, label)))
+            compiled.append((value.name, *self._compile_expression(value.expression, label)))
         return compiled
 
     def _compile_rules(self) -> list[CompiledRule]:
@@ -372,18 +431,26 @@ class Rules(Node):
             effective_until = self._effective_date(rule.effective_until, f"{label}: effective_until")
             if effective_from and effective_until and effective_until < effective_from:
                 raise ValueError(f"{label}: the effective window ends before it starts")
-            try:
-                message = _ENVIRONMENT.from_string(rule.message) if rule.message and rule.message.strip() else None
-            except TemplateSyntaxError as e:
-                raise ValueError(f"{label}: the message is not a valid template: {e}") from e
+            message, message_reads = None, Reads(required=[], optional=[])
+            if rule.message and rule.message.strip():
+                try:
+                    message = _ENVIRONMENT.from_string(rule.message)
+                    message_reads = read_template(rule.message)
+                except TemplateSyntaxError as e:
+                    raise ValueError(f"{label}: the message is not a valid template: {e}") from e
+            applies_compiled, applies_reads = None, Reads(required=[], optional=[])
+            if applies:
+                applies_compiled, applies_reads = self._compile_expression(applies, f"{label}: applies_when")
+            check, check_reads = self._compile_expression(rule.check, f"{label}: the check")
             compiled.append(
                 CompiledRule(
                     rule=rule,
-                    applies=self._compile_expression(applies, f"{label}: applies_when") if applies else None,
-                    applies_reads=read_paths(applies) if applies else Reads(required=[], optional=[]),
-                    check=self._compile_expression(rule.check, f"{label}: the check"),
-                    check_reads=read_paths(rule.check),
+                    applies=applies_compiled,
+                    applies_reads=applies_reads,
+                    check=check,
+                    check_reads=check_reads,
                     message=message,
+                    message_reads=message_reads,
                     effective_from=effective_from,
                     effective_until=effective_until,
                 )
@@ -407,12 +474,12 @@ class Rules(Node):
         context = input_data.model_dump()
         as_of = self._as_of(context.get(AS_OF_KEY))
         derived: dict[str, Any] = {}
-        for name, expression in self._derived:
+        for name, expression, reads in self._derived:
             # One mapping, derived winning, passed positionally: an undeclared key the upstream payload carries
             # under a derived value's name would otherwise clash as a duplicate keyword argument, and a key
             # named `self` would collide with the compiled expression's own bound argument.
             try:
-                derived[name] = expression({**context, **derived})
+                derived[name] = expression(scope_for(reads, {**context, **derived}, RuleUndefined))
                 # A value the expression could not find is missing, and the output stays serializable.
                 if isinstance(derived[name], Undefined):
                     derived[name] = None
@@ -505,7 +572,7 @@ class Rules(Node):
             if missing := self._missing(compiled.applies_reads.required, scope):
                 return self._missing_status(compiled, f"missing value for {missing}")
             try:
-                applies = bool(compiled.applies(scope))
+                applies = bool(compiled.applies(scope_for(compiled.applies_reads, scope, RuleUndefined)))
             except EVALUATION_ERRORS as e:
                 return self._missing_status(compiled, f"applies_when could not be evaluated: {e}")
             if not applies:
@@ -514,7 +581,7 @@ class Rules(Node):
         if missing := self._missing(compiled.check_reads.required, scope):
             return self._missing_status(compiled, f"missing value for {missing}")
         try:
-            holds = bool(compiled.check(scope))
+            holds = bool(compiled.check(scope_for(compiled.check_reads, scope, RuleUndefined)))
         except EVALUATION_ERRORS as e:
             return self._missing_status(compiled, f"check could not be evaluated: {e}")
         return (STATUS_PASSED, None, True) if holds else (compiled.rule.severity.value, None, True)
@@ -536,7 +603,7 @@ class Rules(Node):
         if compiled.message is None:
             return reason
         try:
-            rendered = compiled.message.render(scope).strip()
+            rendered = compiled.message.render(scope_for(compiled.message_reads, scope, RuleUndefined)).strip()
         except EVALUATION_ERRORS:
             rendered = compiled.rule.message.strip() if compiled.rule.message else ""
         if reason:

@@ -550,6 +550,13 @@ def check_decision_table(node, label) -> list:
                 f"decision table {label!r}: {MATCHED_RULES_KEY!r} is reserved for the rules that fired; "
                 "name the output column differently."
             )
+    for side, columns in (("input", inputs), ("output", outputs)):
+        names = [str(column.get("name") or "") for column in columns]
+        duplicates = sorted({name for name in names if name and names.count(name) > 1})
+        if duplicates:
+            errors.append(
+                f"decision table {label!r}: {side} column names used more than once: {', '.join(duplicates)}."
+            )
     for index, rule in enumerate(node.get("rules") or []):
         if not isinstance(rule, dict):
             errors.append(f"decision table {label!r}: rules[{index}] is not an object.")

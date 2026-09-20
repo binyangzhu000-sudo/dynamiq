@@ -302,6 +302,10 @@ def test_as_of_must_be_a_date():
             "rule 1 (template): the message is not a valid template",
         ),
         (
+            {"rules": [Rule(id="a", name="clash", check="date(date) < today()")]},
+            "rule 1 (clash): the check reads 'date' as a value and calls it as a helper",
+        ),
+        (
             {"derived_values": [DerivedValue(name="loan", expression="1")]},
             "derived value 'loan' is already the name of an input or a helper",
         ),
@@ -470,6 +474,46 @@ def test_a_method_call_on_a_record_member_reads_the_member_not_the_method():
     assert statuses(absent) == {"VAT-01": "fail", "KND-01": "not_applicable"}
     assert statuses(gone) == {"VAT-01": "not_evaluated", "KND-01": "pass"}
     assert gone["findings"][0]["message"] == "missing value for invoice"
+
+
+def test_a_record_member_named_like_a_helper_is_the_member_where_it_is_read_and_the_helper_where_it_is_called():
+    """`has(date)` used to pass on an empty record, since the bare name fell through to the `date` helper, and a
+    record carrying `date` broke every rule that called the helper."""
+    node = Rules(
+        name="dated",
+        input_fields=[NamedField(name="date"), NamedField(name="opened"), NamedField(name="amount")],
+        derived_values=[DerivedValue(name="opened_on", expression="date(opened)")],
+        rules=[
+            Rule(id="DT-01", name="Dated", check="has(date)", severity="warn"),
+            Rule(id="DT-02", name="Amount present", check="has(amount)"),
+            Rule(id="DT-03", name="Opened on a date", check="date(opened) <= date('2026-12-31')"),
+            Rule(
+                id="DT-04",
+                name="Dated after opening",
+                check="days_between(opened, date) >= 0",
+                message="Dated {{ date }}, {{ days_between(opened, date) }} days after {{ opened }}",
+            ),
+            Rule(id="DT-05", name="Dated this decade", check="date > '2020-01-01'"),
+        ],
+    )
+
+    empty = run_node(node, {}).output
+    dated = run_node(node, {"date": "2026-09-01", "opened": "2026-08-20", "amount": 5}).output
+    early = run_node(node, {"date": "2026-08-01", "opened": "2026-08-20", "amount": 5}).output
+
+    assert statuses(empty) == {
+        "DT-01": "warn",
+        "DT-02": "fail",
+        "DT-03": "not_evaluated",
+        "DT-04": "not_evaluated",
+        "DT-05": "not_evaluated",
+    }
+    assert empty["findings"][0]["evaluated"] == {"date": None}
+    assert empty["findings"][4]["message"] == "missing value for date"
+    assert statuses(dated) == {rule_id: "pass" for rule_id in ("DT-01", "DT-02", "DT-03", "DT-04", "DT-05")}
+    assert str(dated["derived"]["opened_on"]) == "2026-08-20"
+    assert statuses(early)["DT-04"] == "fail"
+    assert early["findings"][3]["message"] == "Dated 2026-08-01, -19 days after 2026-08-20"
 
 
 def test_a_lookup_that_finds_nothing_is_not_evaluated_wherever_it_stands():

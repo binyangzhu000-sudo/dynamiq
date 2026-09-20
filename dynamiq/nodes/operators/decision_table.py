@@ -295,6 +295,11 @@ class DecisionTable(Node):
             raise ValueError(
                 f"Decision table '{self.name}': '{MATCHED_RULES_KEY}' is reserved for the rules that fired"
             )
+        # The output is keyed by column name, so a name used twice would keep one value and drop the other silently.
+        for side, columns in (("input", self.input_columns), ("output", self.output_columns)):
+            names = [column.name for column in columns]
+            if repeated := next((name for name in names if names.count(name) > 1), None):
+                raise ValueError(f"Decision table '{self.name}': {side} column '{repeated}' is declared twice")
 
         compiled = []
         for index, rule in enumerate(self.rules, start=1):

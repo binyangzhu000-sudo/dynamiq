@@ -115,9 +115,11 @@ def test_a_decision_table_is_checked_the_way_the_platform_checks_it():
     short = table(rules=[{"id": "r1", "when": ["< 580"], "then": ["decline"]}])
     reserved = table(output_columns=[{"id": "c3", "name": "matched_rules"}])
     policy = table(hit_policy="last", aggregation="average")
+    duplicated = table(output_columns=[{"id": "c3", "name": "rate"}, {"id": "c4", "name": "rate"}])
 
     assert [e for e in errors_of(flow_with(short)) if "1 `when` cells for 2 input columns" in e]
     assert [e for e in errors_of(flow_with(reserved)) if "reserved for the rules that fired" in e]
+    assert [e for e in errors_of(flow_with(duplicated)) if "output column names used more than once: rate" in e]
     found = errors_of(flow_with(policy))
     assert [e for e in found if "hit_policy 'last'" in e] and [e for e in found if "aggregation 'average'" in e]
 

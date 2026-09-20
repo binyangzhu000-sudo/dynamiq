@@ -2,7 +2,16 @@ from datetime import date
 
 import pytest
 
-from dynamiq.nodes.operators.rules import days_between, has, read_paths, resolve_path, to_date
+from dynamiq.nodes.operators.rules import (
+    RuleUndefined,
+    days_between,
+    has,
+    read_paths,
+    read_template,
+    resolve_path,
+    scope_for,
+    to_date,
+)
 
 
 @pytest.mark.parametrize(
@@ -34,6 +43,10 @@ from dynamiq.nodes.operators.rules import days_between, has, read_paths, resolve
         ("subject.lower().startswith('urgent')", ["subject"], []),
         ("invoice['lines'].count(item) > 0 and (rec.keys() | list | length) > 0", ["invoice.lines", "item", "rec"], []),
         ("has(invoice.get('vat_rate'))", [], ["invoice"]),
+        # A helper's name is a member where it is read as a value and a call where it is called.
+        ("has(date)", [], ["date"]),
+        ("date > '2026-01-01' and len(items) > 0", ["date", "items"], []),
+        ("days_between(opened, date(today())) < 30", ["opened"], []),
     ],
 )
 def test_read_paths_tells_required_from_optional(expression, required, optional):
@@ -87,3 +100,22 @@ def test_a_key_that_is_not_a_plain_name_stays_one_segment():
     assert read_paths('docs["it\'s"].n > 0').required == ["docs['it\\'s'].n"]
     assert resolve_path({"docs": {"it's": {"n": 1}}}, "docs['it\\'s'].n") == 1
     assert resolve_path({"items": [{"name": "a"}]}, "items[0].name") == "a"
+
+
+def test_a_helper_name_is_a_member_where_it_is_read_and_a_call_where_it_is_called():
+    reads = read_paths("has(date) and days_between(opened, date) >= 0")
+
+    assert (reads.required, reads.optional) == (["opened"], ["date"])
+    assert reads.helpers_called == ("has", "days_between")
+    assert reads.helpers_read == ("date",)
+    assert read_paths("date(opened) <= today()").helpers_read == ()
+    assert read_template("{{ date }} after {{ days_between(opened, date) }} days").helpers_read == ("date",)
+
+
+def test_the_scope_hides_a_member_where_the_helper_is_called_and_marks_an_absent_member_undefined():
+    scope = {"date": "2026-09-01", "opened": "2026-08-20"}
+
+    assert scope_for(read_paths("date(opened)"), scope, RuleUndefined) == {"opened": "2026-08-20"}
+    assert scope_for(read_paths("has(date)"), scope, RuleUndefined) is scope
+    marked = scope_for(read_paths("has(date)"), {}, RuleUndefined)
+    assert isinstance(marked["date"], RuleUndefined) and not has(marked["date"])
