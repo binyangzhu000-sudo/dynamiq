@@ -218,9 +218,9 @@ class Rule(Authored):
     """One check of a Rules node.
 
     `check` is an expression that must hold for the rule to pass; `applies_when` is an optional precondition,
-    and a rule that does not apply reports `not_applicable`. `message` is a template rendered with the values
-    the check read when the check does not hold. `effective_from` and `effective_until` are ISO dates; outside
-    the window the rule is not applicable for the record's `as_of` date.
+    and a rule that does not apply reports `not_applicable`. `message` is a template rendered with the whole
+    record when the check does not hold. `effective_from` and `effective_until` are ISO dates; outside the
+    window the rule is not applicable for the record's `as_of` date.
     """
 
     id: str = Field(default_factory=generate_uuid)

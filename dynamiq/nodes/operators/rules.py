@@ -338,9 +338,9 @@ class Rules(Node):
     when the check does not; `not_applicable` when `applies_when` does not hold or the record's `as_of` date
     falls outside the rule's effective window; `not_evaluated` when a value the check reads is missing or the
     check cannot be evaluated, unless `on_missing` says to report the rule's severity instead. A missing value
-    never passes or fails a rule silently. The message is rendered with the values the check read, which the
-    finding also carries under `evaluated`. Rules compile when the node is built, so a malformed expression
-    fails then, naming the rule.
+    never passes or fails a rule silently. The message is rendered with the whole record, and the finding
+    carries the values the check read under `evaluated`. Rules compile when the node is built, so a malformed
+    expression fails then, naming the rule.
 
     The output holds `findings` in rule order, a `summary` of statuses, `status` and the `derived` values.
     The status is `fail` if any rule failed, else `warn` if any warned, else `not_evaluated` if any check
