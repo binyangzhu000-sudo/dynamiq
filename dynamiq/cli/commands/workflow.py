@@ -499,15 +499,16 @@ def flow_ui_for(flow: dict, custom: dict | None = None) -> dict:
 
 
 def choice_option(source: dict | None, option) -> dict | None:
-    """The option of a Choice node a dependency names, by id or by name; None when there is none."""
+    """The option of a Choice node a dependency names by its id; None when there is none.
+
+    The runtime matches a gate by the option's id alone, so a dependency naming the option's name is
+    drawn as a plain, unlabelled edge, the visible sign that the branch is not gated.
+    """
     if option is None or not isinstance(source, dict) or source.get("type") != flowcheck.CHOICE_TYPE:
         return None
     for candidate in source.get("options") or []:
-        if isinstance(candidate, dict) and option in (candidate.get("id"), candidate.get("name")):
-            return {
-                "id": str(candidate.get("id") or candidate.get("name")),
-                "name": str(candidate.get("name") or candidate.get("id")),
-            }
+        if isinstance(candidate, dict) and candidate.get("id") is not None and str(candidate["id"]) == str(option):
+            return {"id": str(candidate["id"]), "name": str(candidate.get("name") or candidate["id"])}
     return None
 
 

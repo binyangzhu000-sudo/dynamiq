@@ -62,6 +62,12 @@ def test_empty_cell_and_star_match_anything(cell, value):
         ("< 1", 1, False),
         ("!= VA", "FHA", True),
         ("!= VA", "VA", False),
+        ("!= FHA, VA", "USDA", True),
+        ("!= FHA, VA", "FHA", False),
+        ("!= FHA, VA", "VA", False),
+        ("== FHA, VA", "VA", True),
+        ("== FHA, VA", "USDA", False),
+        ('!= "a, b"', "a, b", False),
         (">= 2024-01-01", "2024-06-30", True),
         ("> 10", "abc", False),
     ],
@@ -102,7 +108,7 @@ def test_lists(cell, value, expected):
     assert matches(cell, value) is expected
 
 
-@pytest.mark.parametrize("cell", ["700", "!= 700", "> 1", "[1..2]", "1, 2"])
+@pytest.mark.parametrize("cell", ["700", "!= 700", "> 1", "[1..2]", "1, 2", "!= 1, 2"])
 def test_missing_value_matches_only_an_empty_cell(cell):
     assert not matches(cell, None)
 
@@ -123,6 +129,9 @@ def test_column_type_reads_the_value_and_the_cell():
         (">=", "Any", ">= needs a value to compare with"),
         ("[10..1]", "Any", "runs backwards"),
         ("FHA, , VA", "Any", "cannot contain an empty alternative"),
+        ("!= FHA, , VA", "Any", "cannot contain an empty alternative"),
+        (">= 620, 680", "int", "takes one value, not a list"),
+        ("< a, b", "string", "takes one value, not a list"),
         ("abc", "int", "expected a number"),
         ("[1..2]", "string", "needs a numeric column"),
         ("yes", "bool", "expected true or false"),

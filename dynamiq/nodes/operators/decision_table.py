@@ -156,13 +156,19 @@ def _any(value: Any) -> bool:
     return True
 
 
+def _read_alternatives(alternatives: list[str], column_type: str, where: str) -> list[CellLiteral]:
+    if any(not alternative.strip() for alternative in alternatives):
+        raise ValueError(f"{where}: a list cannot contain an empty alternative")
+    return [read_literal(alternative, column_type, where) for alternative in alternatives]
+
+
 def compile_condition(text: str, column_type: str, where: str) -> Condition:
     """Turns one condition cell into a predicate over the coerced input value.
 
     The grammar is the one the editor validates: empty or `*` matches anything; a literal means equals;
     `>= 620`, `< 0.8`, `!= VA` compare; `[620..680]` is a range, `[` inclusive and `(` exclusive per
-    side; a comma-separated list means any of. A value the column cannot read (None) matches only an
-    empty cell, so a missing input never satisfies a condition, `!=` included.
+    side; a comma-separated list means any of, and `!= FHA, VA` none of. A value the column cannot
+    read (None) matches only an empty cell, so a missing input never satisfies a condition, `!=` included.
     """
     text = text.strip()
     if not text or text == "*":
@@ -190,6 +196,16 @@ def compile_condition(text: str, column_type: str, where: str) -> Condition:
         symbol, rest = comparison.groups()
         if not rest.strip():
             raise ValueError(f"{where}: {symbol} needs a value to compare with")
+        alternatives = split_alternatives(rest)
+        if len(alternatives) > 1:
+            # `!= FHA, VA` is none of the alternatives and `== FHA, VA` any of them. An ordering against
+            # a list has no meaning, and read as one literal it would silently match every input.
+            if symbol not in ("=", "==", "!="):
+                raise ValueError(f"{where}: {symbol} takes one value, not a list")
+            literals = _read_alternatives(alternatives, column_type, where)
+            if symbol == "!=":
+                return lambda value: value is not None and not any(_equals(value, literal) for literal in literals)
+            return lambda value: value is not None and any(_equals(value, literal) for literal in literals)
         literal = read_literal(rest, column_type, where)
         if symbol in ("=", "=="):
             return lambda value: value is not None and _equals(value, literal)
@@ -200,9 +216,7 @@ def compile_condition(text: str, column_type: str, where: str) -> Condition:
 
     alternatives = split_alternatives(text)
     if len(alternatives) > 1:
-        if any(not alternative.strip() for alternative in alternatives):
-            raise ValueError(f"{where}: a list cannot contain an empty alternative")
-        literals = [read_literal(alternative, column_type, where) for alternative in alternatives]
+        literals = _read_alternatives(alternatives, column_type, where)
         return lambda value: value is not None and any(_equals(value, literal) for literal in literals)
 
     literal = read_literal(text, column_type, where)
@@ -230,8 +244,9 @@ class DecisionTable(Node):
     Hit policies: `first` returns the first matching rule in table order, `unique` allows at most one
     match and fails the run on overlap, `collect` takes every match and folds each output column with
     the aggregation: `list` keeps the values, `count` is the number of matches, and `sum`, `min`, `max`
-    fold a numeric column (or an Any column whose values are all numbers) and otherwise keep the list.
-    No match yields None for a folded column and an empty list for a collected one. The output always
+    fold a numeric column (or an Any column whose output cells are all numbers, judged over the table so
+    a run's shape never depends on which rows matched) and otherwise keep the list. No match yields None
+    for a folded column and an empty list for a collected one. The output always
     carries `matched_rules`, the `{id, name}` of the rules that fired, in table order; a rule switched
     off never fires.
     """
@@ -246,10 +261,12 @@ class DecisionTable(Node):
     input_schema: ClassVar[type[DecisionTableInputSchema]] = DecisionTableInputSchema
 
     _compiled: list[CompiledRule] = PrivateAttr(default_factory=list)
+    _folded: list[bool] = PrivateAttr(default_factory=list)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._compiled = self._compile()
+        self._folded = [self._folds_numbers(index, column) for index, column in enumerate(self.output_columns)]
 
     @property
     def to_dict_exclude_params(self):
@@ -308,7 +325,7 @@ class DecisionTable(Node):
 
         matched = self._match(input_data.model_dump())
         output: dict[str, Any] = {
-            column.name: self._fold(column, [compiled.outputs[index] for compiled in matched])
+            column.name: self._fold(index, [compiled.outputs[index] for compiled in matched])
             for index, column in enumerate(self.output_columns)
         }
         output[MATCHED_RULES_KEY] = [{"id": compiled.rule.id, "name": compiled.rule.name} for compiled in matched]
@@ -327,18 +344,29 @@ class DecisionTable(Node):
             raise ValueError(f"Decision table '{self.name}': rules {names} all match, but a unique table allows one")
         return matched
 
-    def _fold(self, column: NamedField, outputs: list[CellLiteral | None]) -> Any:
+    def _fold(self, index: int, outputs: list[CellLiteral | None]) -> Any:
         if self.hit_policy != DecisionHitPolicy.COLLECT:
             return outputs[0] if outputs else None
         if self.aggregation == DecisionAggregation.LIST:
             return outputs
         if self.aggregation == DecisionAggregation.COUNT:
             return len(outputs)
-        numbers = [value for value in outputs if _is_number(value)]
-        present = [value for value in outputs if value is not None]
-        is_numeric = column.type in NUMERIC_TYPES or (column.type == "Any" and numbers and len(numbers) == len(present))
-        if not is_numeric:
+        if not self._folded[index]:
             return outputs
+        numbers = [value for value in outputs if _is_number(value)]
         if not numbers:
             return None
         return _FOLDS[self.aggregation](numbers)
+
+    def _folds_numbers(self, index: int, column: NamedField) -> bool:
+        """Whether an output column folds to a number under sum, min or max.
+
+        Decided over the table's own cells rather than the rows that matched, so a column's shape is the
+        same on every run and no match reads None whether the column is typed or left as Any.
+        """
+        if column.type in NUMERIC_TYPES:
+            return True
+        if column.type != "Any":
+            return False
+        cells = (compiled.outputs[index] for compiled in self._compiled)
+        return all(_is_number(cell) for cell in cells if cell is not None)

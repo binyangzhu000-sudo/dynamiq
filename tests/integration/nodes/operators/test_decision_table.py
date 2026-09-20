@@ -67,6 +67,27 @@ def test_collect_aggregations(aggregation, llpa):
     assert result.output["llpa"] == llpa
 
 
+def test_a_folded_any_column_reads_none_like_a_numeric_one_when_nothing_matches():
+    def table(column_type: str) -> DecisionTable:
+        return DecisionTable(
+            id="llpa",
+            name="llpa",
+            hit_policy="collect",
+            aggregation="sum",
+            input_columns=[NamedField(id="fico", name="fico", type="int")],
+            output_columns=[NamedField(id="llpa", name="llpa", type=column_type)],
+            rules=[
+                DecisionRule(id="r1", name="mid fico", when=["[680..739]"], then=["0.75"]),
+                DecisionRule(id="r2", name="noted only", when=["< 600"], then=[""]),
+            ],
+        )
+
+    for column_type in ("float", "Any"):
+        assert run_node(table(column_type), {"fico": 800}).output["llpa"] is None
+        assert run_node(table(column_type), {"fico": 500}).output["llpa"] is None
+        assert run_node(table(column_type), {"fico": 700}).output["llpa"] == 0.75
+
+
 def test_first_returns_the_first_matching_rule_in_table_order():
     result = run_node(adjustments_table(hit_policy="first"), {"fico": 700, "ltv": 90, "program": "FHA"})
 

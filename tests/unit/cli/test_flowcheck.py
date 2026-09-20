@@ -257,13 +257,18 @@ def test_the_canvas_draws_a_branch_through_the_options_handle():
     canvas = {node["node_name"]: node["id"] for node in ui["nodes"]}
     edges = {edge["target"]: edge for edge in ui["edges"]}
 
-    for target in ("a", "b"):
-        edge = edges[canvas[target]]
-        assert edge["source"] == canvas["route"]
-        assert edge["source_handle"] == "approve"
-        assert edge["label"] == "Approve it"
-        assert edge["is_choice_option"] is True
-        assert edge["id"] == f"reactflow__edge-{canvas['route']}approve-{canvas[target]}target"
+    edge = edges[canvas["a"]]
+    assert edge["source"] == canvas["route"]
+    assert edge["source_handle"] == "approve"
+    assert edge["label"] == "Approve it"
+    assert edge["is_choice_option"] is True
+    assert edge["id"] == f"reactflow__edge-{canvas['route']}approve-{canvas['a']}target"
+
+    # A branch naming the option's name gates nothing at run time, so the canvas draws it ungated.
+    ungated = edges[canvas["b"]]
+    assert ungated["source_handle"] == "source"
+    assert ungated["label"] is None
+    assert ungated["is_choice_option"] is False
 
     plain = edges[canvas["route"]]
     assert plain["source_handle"] == "source"
