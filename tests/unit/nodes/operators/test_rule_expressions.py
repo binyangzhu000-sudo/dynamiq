@@ -1,6 +1,8 @@
+import json
 from datetime import date
 
 import pytest
+from pydantic import BaseModel
 
 from dynamiq.nodes.operators.rules import (
     RuleUndefined,
@@ -121,6 +123,38 @@ def test_the_scope_hides_a_member_where_the_helper_is_called_and_marks_an_absent
     assert scope_for(read_paths("has(date)"), scope, RuleUndefined) is scope
     marked = scope_for(read_paths("has(date)"), {}, RuleUndefined)
     assert isinstance(marked["date"], RuleUndefined) and not has(marked["date"])
+
+
+def test_concrete_materializes_a_lazy_iterable_and_leaves_a_string_and_an_object_alone():
+    class Record(BaseModel):
+        name: str = "doc"
+
+    record = Record()
+    undefined = RuleUndefined(name="gone")
+    value = concrete(
+        {
+            "generator": (item for item in [1, undefined]),
+            "mapped": map(str, [1, 2]),
+            "keys": {"a": 1, "b": 2}.keys(),
+            "items": {"a": undefined}.items(),
+            "span": range(3),
+            "unique": {3},
+            "text": "abc",
+            "record": record,
+        }
+    )
+    assert value == {
+        "generator": [1, None],
+        "mapped": ["1", "2"],
+        "keys": ["a", "b"],
+        "items": [("a", None)],
+        "span": [0, 1, 2],
+        "unique": [3],
+        "text": "abc",
+        "record": record,
+    }
+    assert value["record"] is record
+    assert json.dumps({key: item for key, item in value.items() if key != "record"})
 
 
 def test_concrete_replaces_an_undefined_member_at_any_depth():

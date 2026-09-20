@@ -220,6 +220,43 @@ def test_a_has_guard_lets_the_check_decide_about_the_guarded_document():
     assert unzoned["status"] == "not_evaluated"
 
 
+def test_a_value_left_lazy_reads_the_same_for_every_rule_and_stays_serializable():
+    """`map`, `select` and `selectattr` return generators; the first rule to read one would exhaust it."""
+    node = Rules(
+        id="review",
+        input_fields=[NamedField(name="items")],
+        derived_values=[DerivedValue(name="prices", expression="items | map(attribute='price')")],
+        rules=[
+            Rule(id="A", check="(prices | sum) > 100"),
+            Rule(id="B", check="(prices | sum) > 100"),
+            Rule(id="C", check="(prices | length) == 2"),
+            Rule(id="D", check="items | selectattr('flagged')", severity="warn"),
+            Rule(id="E", check="items | rejectattr('flagged')", applies_when="items | selectattr('price', 'gt', 50)"),
+        ],
+    )
+    items = [{"price": 60, "flagged": False}, {"price": 60, "flagged": False}]
+
+    result = node.run(input_data={"items": items}, config=RunnableConfig(callbacks=[]))
+
+    # The identical checks agree, the count evaluates, and a check or a condition left lazy is judged by the
+    # list it yields rather than by a generator, which is always true.
+    assert result.status == RunnableStatus.SUCCESS
+    assert {f["rule_id"]: f["status"] for f in result.output["findings"]} == {
+        "A": "pass",
+        "B": "pass",
+        "C": "pass",
+        "D": "warn",
+        "E": "pass",
+    }
+    assert result.output["derived"] == {"prices": [60, 60]}
+    assert json.dumps(result.output)
+
+    flagged = node.run(
+        input_data={"items": [{**items[0], "flagged": True}, items[1]]}, config=RunnableConfig(callbacks=[])
+    )
+    assert {f["rule_id"]: f["status"] for f in flagged.output["findings"]}["D"] == "pass"
+
+
 def test_an_upstream_key_named_like_a_derived_value_does_not_break_the_next_one():
     node = Rules(
         id="bands",

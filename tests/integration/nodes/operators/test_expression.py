@@ -44,6 +44,25 @@ def test_pass_through_adds_the_inputs_and_an_expression_wins_on_a_clash():
     assert run_node(node, {"price": 2.5, "quantity": 1}).output == {"price": 2.5, "quantity": 2}
 
 
+def test_an_expression_left_lazy_returns_a_list():
+    """`map`, `select` and `selectattr` return generators, which no encoder can record."""
+    node = Expression(
+        id="calc",
+        input_fields=[NamedField(name="items")],
+        expressions=[
+            ExpressionItem(key="prices", expression="items | map(attribute='price')"),
+            ExpressionItem(key="cheap", expression="items | selectattr('price', 'lt', 100)"),
+            ExpressionItem(key="keys", expression="items[0].keys()"),
+        ],
+    )
+
+    result = node.run(input_data={"items": [{"price": 60}, {"price": 120}]}, config=RunnableConfig(callbacks=[]))
+
+    assert result.status == RunnableStatus.SUCCESS
+    assert result.output == {"prices": [60, 120], "cheap": [{"price": 60}], "keys": ["price"]}
+    assert json.dumps(result.output)
+
+
 def test_a_missing_input_on_its_own_is_none_but_fails_inside_arithmetic():
     bare = expression_node(expressions=[ExpressionItem(key="discount", expression="discount")])
     assert run_node(bare, {"price": 2.5}).output == {"discount": None}

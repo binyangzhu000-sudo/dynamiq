@@ -1,5 +1,5 @@
 import re
-from collections.abc import Callable
+from collections.abc import Callable, ItemsView, Iterator, KeysView, ValuesView
 from datetime import date, datetime
 from typing import Any, ClassVar, Literal, NamedTuple
 from uuid import uuid4
@@ -104,11 +104,14 @@ _ENVIRONMENT = ImmutableSandboxedEnvironment(undefined=RuleUndefined)
 
 
 def concrete(value: Any) -> Any:
-    """Returns the value with every undefined member replaced by None.
+    """Returns the value with every undefined member replaced by None and every lazy iterable materialized.
 
     Jinja turns a result into None only when the whole result is undefined. A list or a dict the expression
     builds keeps the undefined objects inside it, `map(attribute=...)` over items that lack the attribute above
-    all, and such an object is not serializable and raises on its first use downstream.
+    all, and such an object is not serializable and raises on its first use downstream. `map`, `select`,
+    `selectattr`, `reject` and `rejectattr` return generators, which the first rule to read one exhausts for
+    every rule after it, and which no encoder can record, so an iterator, a dict view, a range or a set becomes
+    a list; a string and an object that merely iterates, a document say, stay what they are.
     """
     if isinstance(value, Undefined):
         return None
@@ -118,7 +121,20 @@ def concrete(value: Any) -> Any:
         return [concrete(item) for item in value]
     if isinstance(value, tuple):
         return tuple(concrete(item) for item in value)
+    if isinstance(value, (Iterator, KeysView, ValuesView, ItemsView, range, set, frozenset)):
+        return [concrete(item) for item in value]
     return value
+
+
+def holds(value: Any) -> bool:
+    """The truth of a check or a condition.
+
+    A lazy result is judged by the list it yields, since a generator is true whatever it would yield; an
+    undefined result keeps raising, which is what makes a lookup that found nothing `not_evaluated`.
+    """
+    if isinstance(value, Undefined):
+        return bool(value)
+    return bool(concrete(value))
 
 
 _ENVIRONMENT.globals.update(HELPERS)
@@ -619,7 +635,7 @@ class Rules(Node):
             if missing := self._missing(compiled.applies_reads.required, scope):
                 return self._missing_status(compiled, f"missing value for {missing}")
             try:
-                applies = bool(compiled.applies(scope_for(compiled.applies_reads, scope, RuleUndefined)))
+                applies = holds(compiled.applies(scope_for(compiled.applies_reads, scope, RuleUndefined)))
             except EVALUATION_ERRORS as e:
                 return self._missing_status(compiled, f"applies_when could not be evaluated: {e}")
             if not applies:
@@ -628,10 +644,10 @@ class Rules(Node):
         if missing := self._missing(compiled.check_reads.required, scope):
             return self._missing_status(compiled, f"missing value for {missing}")
         try:
-            holds = bool(compiled.check(scope_for(compiled.check_reads, scope, RuleUndefined)))
+            held = holds(compiled.check(scope_for(compiled.check_reads, scope, RuleUndefined)))
         except EVALUATION_ERRORS as e:
             return self._missing_status(compiled, f"check could not be evaluated: {e}")
-        return (STATUS_PASSED, None, True) if holds else (compiled.rule.severity.value, None, True)
+        return (STATUS_PASSED, None, True) if held else (compiled.rule.severity.value, None, True)
 
     def _missing_status(self, compiled: CompiledRule, reason: str) -> tuple[str, str, bool]:
         if self.on_missing == RuleMissingPolicy.FAIL:
