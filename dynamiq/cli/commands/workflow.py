@@ -775,7 +775,8 @@ def list_workflow_versions(*, api: ApiClient, settings: Settings, workflow_id: s
 def validate_flow_command(*, api: ApiClient, settings: Settings, flow: str, offline: bool):
     """Check a flow JSON locally, before it is saved. Exits non-zero on any error.
 
-    FLOW is inline JSON or @file. Nothing is sent anywhere; this is a read of the file.
+    FLOW is inline JSON or @file. Nothing is persisted: the flow is read from disk, and the one
+    request made is a read of the platform's node types, which --offline skips.
 
     The API accepts a flow it cannot run - unknown keys are dropped rather than rejected -
     so a misplaced selector yields empty output instead of an error, and a tool with the
