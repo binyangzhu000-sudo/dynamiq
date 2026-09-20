@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from dynamiq import Workflow
@@ -148,3 +150,28 @@ def test_an_input_named_like_a_helper_is_the_input_where_it_is_read_and_the_help
     assert absent.output == {"dated": None, "opened_year": 2026}
     with pytest.raises(ValueError, match="'clash' reads 'date' as a value and calls it as a helper"):
         Expression(expressions=[ExpressionItem(key="clash", expression="date(date)")])
+
+
+def test_a_missing_input_inside_a_list_or_a_dict_the_expression_builds_is_none_there_too():
+    node = Expression(
+        name="pairs",
+        input_fields=[NamedField(name="price"), NamedField(name="discount")],
+        expressions=[
+            ExpressionItem(key="pair", expression="{'a': price, 'b': discount}"),
+            ExpressionItem(key="alone", expression="discount"),
+            ExpressionItem(key="items", expression="[price, discount]"),
+            ExpressionItem(key="nested", expression="[[price, discount], {'d': [discount]}]"),
+        ],
+    )
+
+    result = node.run(input_data={"price": 2.5}, config=RunnableConfig(callbacks=[]))
+
+    # Jinja turns only a whole undefined result into None; one inside a container has to be replaced the
+    # same way, or the output cannot be serialized and raises on its first use downstream.
+    assert result.output == {
+        "pair": {"a": 2.5, "b": None},
+        "alone": None,
+        "items": [2.5, None],
+        "nested": [[2.5, None], {"d": [None]}],
+    }
+    assert json.loads(json.dumps(result.output)) == result.output

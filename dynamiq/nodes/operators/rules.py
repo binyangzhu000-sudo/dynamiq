@@ -101,6 +101,26 @@ class RuleUndefined(ChainableUndefined):
 
 # One sandbox for every Rules node; the expressions it compiles are stateless.
 _ENVIRONMENT = ImmutableSandboxedEnvironment(undefined=RuleUndefined)
+
+
+def concrete(value: Any) -> Any:
+    """Returns the value with every undefined member replaced by None.
+
+    Jinja turns a result into None only when the whole result is undefined. A list or a dict the expression
+    builds keeps the undefined objects inside it, `map(attribute=...)` over items that lack the attribute above
+    all, and such an object is not serializable and raises on its first use downstream.
+    """
+    if isinstance(value, Undefined):
+        return None
+    if isinstance(value, dict):
+        return {key: concrete(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [concrete(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(concrete(item) for item in value)
+    return value
+
+
 _ENVIRONMENT.globals.update(HELPERS)
 
 
@@ -479,10 +499,9 @@ class Rules(Node):
             # under a derived value's name would otherwise clash as a duplicate keyword argument, and a key
             # named `self` would collide with the compiled expression's own bound argument.
             try:
-                derived[name] = expression(scope_for(reads, {**context, **derived}, RuleUndefined))
-                # A value the expression could not find is missing, and the output stays serializable.
-                if isinstance(derived[name], Undefined):
-                    derived[name] = None
+                # A value the expression could not find is missing, inside a list or a dict it built as well,
+                # and the output stays serializable.
+                derived[name] = concrete(expression(scope_for(reads, {**context, **derived}, RuleUndefined)))
             except EVALUATION_ERRORS:
                 derived[name] = None
         scope = {**context, **derived}

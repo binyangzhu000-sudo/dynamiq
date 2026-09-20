@@ -4,6 +4,7 @@ import pytest
 
 from dynamiq.nodes.operators.rules import (
     RuleUndefined,
+    concrete,
     days_between,
     has,
     read_paths,
@@ -119,3 +120,12 @@ def test_the_scope_hides_a_member_where_the_helper_is_called_and_marks_an_absent
     assert scope_for(read_paths("has(date)"), scope, RuleUndefined) is scope
     marked = scope_for(read_paths("has(date)"), {}, RuleUndefined)
     assert isinstance(marked["date"], RuleUndefined) and not has(marked["date"])
+
+
+def test_concrete_replaces_an_undefined_member_at_any_depth():
+    undefined = RuleUndefined(name="gone")
+
+    assert concrete(undefined) is None
+    assert concrete([1, undefined, (2, undefined)]) == [1, None, (2, None)]
+    assert concrete({"a": undefined, "b": {"c": [undefined]}}) == {"a": None, "b": {"c": [None]}}
+    assert concrete({"a": 1, "b": [2, "x"]}) == {"a": 1, "b": [2, "x"]}

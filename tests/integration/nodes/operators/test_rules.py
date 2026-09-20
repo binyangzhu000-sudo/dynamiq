@@ -1,3 +1,4 @@
+import json
 import re
 
 import pytest
@@ -622,3 +623,23 @@ def test_a_missing_value_under_the_strict_policy_never_reads_as_pass():
     assert strict["status"] == "not_evaluated"
     # A value that is there lets the rule decide, and the record reads as it should.
     assert run_node(node("fail"), {"docs": {"appraisal": {"value": 5}}}).output["status"] == "pass"
+
+
+def test_a_derived_list_or_dict_keeps_none_where_the_expression_found_no_member():
+    """`map(attribute=...)` yields an undefined value for every item that lacks the attribute; inside the list
+    or the dict a derived value builds it has to read as None, or the output cannot be serialized."""
+    node = Rules(
+        name="discounts",
+        input_fields=[NamedField(name="items")],
+        derived_values=[
+            DerivedValue(name="discounts", expression="items | map(attribute='discount') | list"),
+            DerivedValue(name="pair", expression="{'first': items[0].discount, 'second': items[1].discount}"),
+        ],
+        rules=[Rule(id="any", name="has discounts", check="discounts | length > 0")],
+    )
+
+    result = run_node(node, {"items": [{"discount": 5}, {"sku": "x"}]}).output
+
+    assert result["derived"] == {"discounts": [5, None], "pair": {"first": 5, "second": None}}
+    assert statuses(result) == {"any": "pass"}
+    assert json.loads(json.dumps(result)) == result

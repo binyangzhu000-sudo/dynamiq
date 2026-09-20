@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from dynamiq.nodes import Node, NodeGroup
 from dynamiq.nodes.node import ensure_config
-from dynamiq.nodes.operators.rules import HELPERS, Reads, read_paths, scope_for
+from dynamiq.nodes.operators.rules import HELPERS, Reads, concrete, read_paths, scope_for
 from dynamiq.nodes.types import ExpressionItem, NamedField
 from dynamiq.runnables import RunnableConfig
 
@@ -80,8 +80,9 @@ class Expression(Node):
         # The context goes in positionally: spread as keywords, an input named `self` would collide with the
         # compiled expression's own bound argument and fail the run before anything is evaluated. An input named
         # like a helper is visible where the expression reads it and hidden where the expression calls the helper.
+        # A missing input inside a list or a dict the expression builds is None there too.
         computed = {
-            key: expression(scope_for(reads, context, _ENVIRONMENT.undefined))
+            key: concrete(expression(scope_for(reads, context, _ENVIRONMENT.undefined)))
             for key, expression, reads in self._compiled
         }
         return {**context, **computed} if self.pass_through else computed
